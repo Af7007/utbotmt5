@@ -4,7 +4,7 @@
 
 #property copyright "MT5 Webhook Automation"
 #property link      "https://github.com"
-#property version   "3.5"
+#property version   "4.0"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -23,16 +23,13 @@ input bool     EnableBreakeven = true;        // Ativar Breakeven
 input int      BreakEvenPoints = 100;         // Breakeven após X pontos de lucro
 input int      BreakEvenExtraPoints = 20;     // Pontos além do ponto de entrada
 input bool     EnableTrailingStop = true;     // Ativar Trailing Stop
-input int      TrailingStopPoints = 100;      // Trailing stop em pontos (fixo)
+input int      TrailingStopPoints = 100;      // Trailing stop em pontos
 input int      TrailingStepPoints = 50;       // Mover SL a cada X pontos
-input bool     UseDynamicTrailing = false;    // Trailing dinâmico baseado em ATR
+input bool     UseATRBasedSL = false;         // SL inicial baseado em ATR
 input int      ATRPeriod = 14;                // Período do ATR
-input double   ATRMultiplier = 2.0;           // Multiplicador do ATR
+input double   ATRMultiplier = 1.5;           // Multiplicador do ATR para SL
 input bool     EnableReverseTrading = false;  // Inverter sinais (long→sell, short→buy)
 input bool     AutoAdjustForSymbol = true;    // Auto-ajustar valores por símbolo
-input bool     UseCandleBasedSL = false;      // SL baseado em candles
-input int      CandleLookback = 1;            // Quantos candles olhar (1 = último)
-input int      CandleSLMarginPoints = 20;     // Margem além do Low/High (pontos)
 
 CTrade trade;
 CSymbolInfo symbolInfo;
@@ -60,40 +57,17 @@ void AdjustParametersForSymbol()
     Print("Point: ", point);
     Print("Min Stop Level: ", minStopLevel, " points (", minDistance, " price distance)");
 
-    // Valores sugeridos baseados no símbolo
+    // Usar valores configurados pelo usuário
     int suggestedTP = TakeProfitPoints;
     int suggestedSL = StopLossPoints;
     int suggestedBE = BreakEvenPoints;
     int suggestedTrailing = TrailingStopPoints;
 
-    // Detectar tipo de símbolo e ajustar
-    if (StringFind(TradingSymbol, "BTC") >= 0 || StringFind(TradingSymbol, "BTCUSD") >= 0)
-    {
-        // BTCUSD: preço ~$90,000, precisa stops maiores
-        suggestedTP = 10000;   // $100
-        suggestedSL = 5000;    // $50
-        suggestedBE = 1000;    // $10
-        suggestedTrailing = 2000; // $20
-        Print("Detected: BTCUSD - Using larger stop values");
-    }
-    else if (StringFind(TradingSymbol, "XAU") >= 0 || StringFind(TradingSymbol, "GOLD") >= 0)
-    {
-        // XAUUSD: preço ~$2650, stops padrão são OK
-        suggestedTP = 1000;    // $10
-        suggestedSL = 500;     // $5
-        suggestedBE = 100;     // $1
-        suggestedTrailing = 100; // $1
-        Print("Detected: XAUUSD - Using default values");
-    }
-    else if (StringFind(TradingSymbol, "EUR") >= 0 || StringFind(TradingSymbol, "USD") >= 0)
-    {
-        // Forex: valores pequenos
-        suggestedTP = 200;     // 20 pips
-        suggestedSL = 100;     // 10 pips
-        suggestedBE = 30;      // 3 pips
-        suggestedTrailing = 50; // 5 pips
-        Print("Detected: Forex - Using smaller values");
-    }
+    Print("User configured values:");
+    Print("  TakeProfit: ", suggestedTP, " points");
+    Print("  StopLoss: ", suggestedSL, " points");
+    Print("  Breakeven: ", suggestedBE, " points");
+    Print("  Trailing: ", suggestedTrailing, " points");
 
     // Validar contra stop level mínimo
     if (minStopLevel > 0)
@@ -123,13 +97,13 @@ void AdjustParametersForSymbol()
         }
     }
 
-    // Aplicar valores ajustados
+    // Aplicar valores (validados contra stop level mínimo)
     adjustedTPPoints = suggestedTP;
     adjustedSLPoints = suggestedSL;
     adjustedBEPoints = suggestedBE;
     adjustedTrailingPoints = suggestedTrailing;
 
-    Print("ADJUSTED VALUES:");
+    Print("FINAL VALUES (after validation):");
     Print("  TakeProfit: ", adjustedTPPoints, " points (", adjustedTPPoints * point, " price)");
     Print("  StopLoss: ", adjustedSLPoints, " points (", adjustedSLPoints * point, " price)");
     Print("  Breakeven: ", adjustedBEPoints, " points");
@@ -167,7 +141,7 @@ int OnInit()
         adjustedTrailingPoints = TrailingStopPoints;
     }
 
-    Print("=== HttpTrader EA Initialized v3.5 ===");
+    Print("=== HttpTrader EA Initialized v4.0 ===");
     Print("Symbol: ", TradingSymbol);
     Print("Point Size: ", symbolInfo.Point());
     Print("Digits: ", symbolInfo.Digits());
@@ -185,6 +159,14 @@ int OnInit()
     Print("Take Profit: ", adjustedTPPoints, " points (", adjustedTPPoints * symbolInfo.Point(), " price distance)");
     Print("Stop Loss: ", adjustedSLPoints, " points (", adjustedSLPoints * symbolInfo.Point(), " price distance)");
     Print("Signal File: ", SignalFilePath);
+    Print("--- Stop Loss Settings ---");
+    Print("ATR-Based SL: ", UseATRBasedSL ? "YES (Adaptive)" : "NO (Fixed)");
+    if (UseATRBasedSL)
+    {
+        Print("ATR Period: ", ATRPeriod);
+        Print("ATR Multiplier: ", ATRMultiplier, "x");
+        Print("Note: SL adapts to volatility at order open");
+    }
     Print("--- Breakeven Settings ---");
     Print("Breakeven Enabled: ", EnableBreakeven ? "YES" : "NO");
     if (EnableBreakeven)
@@ -196,24 +178,8 @@ int OnInit()
     Print("Trailing Stop Enabled: ", EnableTrailingStop ? "YES" : "NO");
     if (EnableTrailingStop)
     {
-        Print("Dynamic Trailing: ", UseDynamicTrailing ? "YES (ATR-Based)" : "NO (Fixed)");
-        if (UseDynamicTrailing)
-        {
-            Print("ATR Period: ", ATRPeriod);
-            Print("ATR Multiplier: ", ATRMultiplier, "x");
-        }
-        else
-        {
-            Print("Trailing Distance: ", adjustedTrailingPoints, " points");
-            Print("Trailing Step: ", TrailingStepPoints, " points");
-        }
-    }
-    Print("--- Candle-Based SL Settings ---");
-    Print("Candle-Based SL: ", UseCandleBasedSL ? "YES" : "NO");
-    if (UseCandleBasedSL)
-    {
-        Print("Lookback Candles: ", CandleLookback);
-        Print("Margin: ", CandleSLMarginPoints, " points");
+        Print("Trailing Distance: ", adjustedTrailingPoints, " points");
+        Print("Trailing Step: ", TrailingStepPoints, " points");
     }
 
     return INIT_SUCCEEDED;
@@ -326,55 +292,33 @@ bool CloseAllPositions()
 //+------------------------------------------------------------------+
 //| Get SL price based on recent candles                             |
 //+------------------------------------------------------------------+
-double GetCandleBasedSL(bool isBuy)
+//+------------------------------------------------------------------+
+//| Get ATR value for SL calculation                                 |
+//+------------------------------------------------------------------+
+double GetATRValue()
 {
-    double point = symbolInfo.Point();
-    int digits = symbolInfo.Digits();
+    int atrHandle = iATR(TradingSymbol, PERIOD_CURRENT, ATRPeriod);
 
-    // Encontrar o low/high mais extremo nos últimos X candles
-    double extremePrice = 0;
-
-    for (int i = 1; i <= CandleLookback; i++)
+    if (atrHandle == INVALID_HANDLE)
     {
-        double candleHigh = iHigh(TradingSymbol, PERIOD_CURRENT, i);
-        double candleLow = iLow(TradingSymbol, PERIOD_CURRENT, i);
-
-        if (isBuy)
-        {
-            // Para BUY: encontrar o LOW mais baixo
-            if (extremePrice == 0 || candleLow < extremePrice)
-            {
-                extremePrice = candleLow;
-            }
-        }
-        else
-        {
-            // Para SELL: encontrar o HIGH mais alto
-            if (extremePrice == 0 || candleHigh > extremePrice)
-            {
-                extremePrice = candleHigh;
-            }
-        }
+        Print("ERROR: Failed to create ATR indicator handle");
+        return 0;
     }
 
-    // Adicionar margem
-    double margin = CandleSLMarginPoints * point;
-    double slPrice = 0;
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
 
-    if (isBuy)
+    if (CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) <= 0)
     {
-        slPrice = NormalizeDouble(extremePrice - margin, digits);
-        Print("Candle-Based SL (BUY): Lowest Low = ", extremePrice,
-              " - Margin (", CandleSLMarginPoints, " pts) = SL ", slPrice);
-    }
-    else
-    {
-        slPrice = NormalizeDouble(extremePrice + margin, digits);
-        Print("Candle-Based SL (SELL): Highest High = ", extremePrice,
-              " + Margin (", CandleSLMarginPoints, " pts) = SL ", slPrice);
+        Print("ERROR: Failed to copy ATR buffer");
+        IndicatorRelease(atrHandle);
+        return 0;
     }
 
-    return slPrice;
+    double atrValue = atrBuffer[0];
+    IndicatorRelease(atrHandle);
+
+    return atrValue;
 }
 
 //+------------------------------------------------------------------+
@@ -417,17 +361,34 @@ bool PlaceBuyOrder(double volume)
     double point = symbolInfo.Point();
     int digits = symbolInfo.Digits();
 
-    // Calcular SL (baseado em candles ou fixo)
+    // Calcular SL (baseado em ATR ou fixo)
     double sl = 0;
     double slDistance = 0;
 
-    if (UseCandleBasedSL)
+    if (UseATRBasedSL)
     {
-        sl = GetCandleBasedSL(true);
-        slDistance = ask - sl;
+        // SL baseado em ATR
+        double atrValue = GetATRValue();
+
+        if (atrValue > 0)
+        {
+            slDistance = atrValue * ATRMultiplier;
+            sl = NormalizeDouble(ask - slDistance, digits);
+            Print("ATR-Based SL (BUY): ATR=", NormalizeDouble(atrValue, digits),
+                  " x ", ATRMultiplier, " = ", NormalizeDouble(slDistance, digits),
+                  " → SL=", sl);
+        }
+        else
+        {
+            // Fallback para fixo se ATR falhar
+            slDistance = adjustedSLPoints * point;
+            sl = NormalizeDouble(ask - slDistance, digits);
+            Print("ATR failed, using fixed SL: ", adjustedSLPoints, " points");
+        }
     }
     else
     {
+        // SL fixo
         slDistance = adjustedSLPoints * point;
         sl = NormalizeDouble(ask - slDistance, digits);
     }
@@ -475,17 +436,34 @@ bool PlaceSellOrder(double volume)
     double point = symbolInfo.Point();
     int digits = symbolInfo.Digits();
 
-    // Calcular SL (baseado em candles ou fixo)
+    // Calcular SL (baseado em ATR ou fixo)
     double sl = 0;
     double slDistance = 0;
 
-    if (UseCandleBasedSL)
+    if (UseATRBasedSL)
     {
-        sl = GetCandleBasedSL(false);
-        slDistance = sl - bid;
+        // SL baseado em ATR
+        double atrValue = GetATRValue();
+
+        if (atrValue > 0)
+        {
+            slDistance = atrValue * ATRMultiplier;
+            sl = NormalizeDouble(bid + slDistance, digits);
+            Print("ATR-Based SL (SELL): ATR=", NormalizeDouble(atrValue, digits),
+                  " x ", ATRMultiplier, " = ", NormalizeDouble(slDistance, digits),
+                  " → SL=", sl);
+        }
+        else
+        {
+            // Fallback para fixo se ATR falhar
+            slDistance = adjustedSLPoints * point;
+            sl = NormalizeDouble(bid + slDistance, digits);
+            Print("ATR failed, using fixed SL: ", adjustedSLPoints, " points");
+        }
     }
     else
     {
+        // SL fixo
         slDistance = adjustedSLPoints * point;
         sl = NormalizeDouble(bid + slDistance, digits);
     }
@@ -732,35 +710,6 @@ bool ApplyBreakeven(ulong ticket)
 }
 
 //+------------------------------------------------------------------+
-//| Get ATR value for dynamic trailing                               |
-//+------------------------------------------------------------------+
-double GetATRValue()
-{
-    int atrHandle = iATR(TradingSymbol, PERIOD_CURRENT, ATRPeriod);
-
-    if (atrHandle == INVALID_HANDLE)
-    {
-        Print("ERROR: Failed to create ATR indicator handle");
-        return 0;
-    }
-
-    double atrBuffer[];
-    ArraySetAsSeries(atrBuffer, true);
-
-    if (CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) <= 0)
-    {
-        Print("ERROR: Failed to copy ATR buffer");
-        IndicatorRelease(atrHandle);
-        return 0;
-    }
-
-    double atrValue = atrBuffer[0];
-    IndicatorRelease(atrHandle);
-
-    return atrValue;
-}
-
-//+------------------------------------------------------------------+
 //| Apply Trailing Stop to position                                  |
 //+------------------------------------------------------------------+
 void ApplyTrailingStop(ulong ticket)
@@ -772,38 +721,8 @@ void ApplyTrailingStop(ulong ticket)
     double point = symbolInfo.Point();
     int digits = symbolInfo.Digits();
 
-    // Calcular trailing usando valores ajustados OU ATR dinâmico
-    double trailingDistance;
-    int trailingPointsUsed;
-
-    if (UseDynamicTrailing)
-    {
-        // Modo dinâmico: usa ATR
-        double atrValue = GetATRValue();
-
-        if (atrValue > 0)
-        {
-            trailingDistance = atrValue * ATRMultiplier;
-            trailingPointsUsed = (int)(trailingDistance / point);
-            Print("Dynamic Trailing: ATR=", NormalizeDouble(atrValue, digits),
-                  " x ", ATRMultiplier, " = ", NormalizeDouble(trailingDistance, digits),
-                  " (", trailingPointsUsed, " points)");
-        }
-        else
-        {
-            // Fallback para fixo se ATR falhar
-            trailingDistance = adjustedTrailingPoints * point;
-            trailingPointsUsed = adjustedTrailingPoints;
-            Print("Dynamic Trailing: ATR failed, using fixed ", trailingPointsUsed, " points");
-        }
-    }
-    else
-    {
-        // Modo fixo tradicional
-        trailingDistance = adjustedTrailingPoints * point;
-        trailingPointsUsed = adjustedTrailingPoints;
-    }
-
+    // Calcular trailing usando valores ajustados (fixo)
+    double trailingDistance = adjustedTrailingPoints * point;
     double trailingStep = TrailingStepPoints * point;
 
     symbolInfo.RefreshRates();
@@ -828,7 +747,7 @@ void ApplyTrailingStop(ulong ticket)
                     Print("TRAILING STOP: Ticket=", ticket,
                           " Old SL=", currentSL,
                           " New SL=", newSL,
-                          " (", trailingPointsUsed, " points from price)");
+                          " (", adjustedTrailingPoints, " points from price)");
                 }
                 else
                 {
@@ -854,7 +773,7 @@ void ApplyTrailingStop(ulong ticket)
                     Print("TRAILING STOP: Ticket=", ticket,
                           " Old SL=", currentSL,
                           " New SL=", newSL,
-                          " (", trailingPointsUsed, " points from price)");
+                          " (", adjustedTrailingPoints, " points from price)");
                 }
                 else
                 {
