@@ -4,7 +4,7 @@
 
 #property copyright "MT5 Webhook Automation"
 #property link      "https://github.com"
-#property version   "4.0"
+#property version   "4.1"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -18,7 +18,6 @@ input double   RiskPercent = 2.0;             // % do equity por trade
 input int      TakeProfitPoints = 1000;       // TP em pontos (ex: 1000 = $10 para XAUUSD)
 input int      StopLossPoints = 500;          // SL em pontos (ex: 500 = $5 para XAUUSD)
 input int      PollingIntervalSec = 1;        // Frequência polling (segundos)
-input string   SignalFilePath = "signal.json"; // Caminho do arquivo de sinal
 input bool     EnableBreakeven = true;        // Ativar Breakeven
 input int      BreakEvenPoints = 100;         // Breakeven após X pontos de lucro
 input int      BreakEvenExtraPoints = 20;     // Pontos além do ponto de entrada
@@ -30,6 +29,10 @@ input int      ATRPeriod = 14;                // Período do ATR
 input double   ATRMultiplier = 1.5;           // Multiplicador do ATR para SL
 input bool     EnableReverseTrading = false;  // Inverter sinais (long→sell, short→buy)
 input bool     AutoAdjustForSymbol = true;    // Auto-ajustar valores por símbolo
+input bool     EnableTrendContinuation = true; // Reentrar após TP em tendências
+input int      TrendContinuationDelaySec = 60; // Segundos antes de reentrar
+input int      MaxConsecutiveReentries = 3;    // Máximo de reentradas seguidas
+input double   ReentryRiskPercent = 1.5;       // % risco para reentradas (menor que principal)
 
 CTrade trade;
 CSymbolInfo symbolInfo;
@@ -42,6 +45,19 @@ int adjustedTPPoints = 0;
 int adjustedSLPoints = 0;
 int adjustedBEPoints = 0;
 int adjustedTrailingPoints = 0;
+
+//--- Trend Continuation variables
+string lastTradeDirection = "";       // "buy" ou "sell"
+datetime lastTradeCloseTime = 0;      // Timestamp do fechamento
+double lastTradeProfit = 0;           // Lucro do último trade
+bool lastTradeWasWin = false;         // Se fechou com lucro
+int consecutiveReentries = 0;         // Contador de reentradas
+bool hasOpenPosition = false;         // Cache de posição aberta
+ulong lastKnownTicket = 0;            // Ticket da última posição conhecida
+
+//--- Startup Protection
+datetime eaStartTime = 0;             // Timestamp de quando o EA iniciou
+int startupDelaySeconds = 5;          // Segundos para ignorar sinais no startup
 
 //+------------------------------------------------------------------+
 //| Auto-adjust parameters based on symbol                           |
@@ -141,7 +157,7 @@ int OnInit()
         adjustedTrailingPoints = TrailingStopPoints;
     }
 
-    Print("=== HttpTrader EA Initialized v4.0 ===");
+    Print("=== HttpTrader EA Initialized v4.1 ===");
     Print("Symbol: ", TradingSymbol);
     Print("Point Size: ", symbolInfo.Point());
     Print("Digits: ", symbolInfo.Digits());
@@ -158,7 +174,7 @@ int OnInit()
     Print("--- Active Values (", AutoAdjustForSymbol ? "AUTO-ADJUSTED" : "MANUAL", ") ---");
     Print("Take Profit: ", adjustedTPPoints, " points (", adjustedTPPoints * symbolInfo.Point(), " price distance)");
     Print("Stop Loss: ", adjustedSLPoints, " points (", adjustedSLPoints * symbolInfo.Point(), " price distance)");
-    Print("Signal File: ", SignalFilePath);
+    Print("Signal File: ", GetSignalFilePath());
     Print("--- Stop Loss Settings ---");
     Print("ATR-Based SL: ", UseATRBasedSL ? "YES (Adaptive)" : "NO (Fixed)");
     if (UseATRBasedSL)
@@ -181,6 +197,39 @@ int OnInit()
         Print("Trailing Distance: ", adjustedTrailingPoints, " points");
         Print("Trailing Step: ", TrailingStepPoints, " points");
     }
+    Print("--- Trend Continuation Settings ---");
+    Print("Trend Continuation: ", EnableTrendContinuation ? "YES" : "NO");
+    if (EnableTrendContinuation)
+    {
+        Print("Reentry Delay: ", TrendContinuationDelaySec, " seconds");
+        Print("Max Reentries: ", MaxConsecutiveReentries);
+        Print("Reentry Risk: ", ReentryRiskPercent, "%");
+    }
+
+    // Initialize position tracking
+    hasOpenPosition = HasOpenPositionForSymbol();
+    if (hasOpenPosition)
+    {
+        lastKnownTicket = GetCurrentPositionTicket();
+        Print("Found existing position: Ticket=", lastKnownTicket);
+    }
+
+    // IMPORTANT: Initialize lastProcessedJson with current file content
+    // to avoid processing old signals on EA startup
+    lastProcessedJson = ReadSignalFile();
+    lastProcessedTime = TimeCurrent();
+    if (lastProcessedJson != "")
+    {
+        Print("Ignoring existing signal file on startup: ", lastProcessedJson);
+    }
+
+    // Initialize trend continuation state to prevent auto-trigger on startup
+    lastTradeWasWin = false;
+    lastTradeDirection = "";
+    lastTradeCloseTime = 0;
+    consecutiveReentries = 0;
+
+    Print("=== EA Ready - Waiting for NEW signals only ===");
 
     return INIT_SUCCEEDED;
 }
@@ -200,6 +249,12 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    // Check for position closure (trend continuation feature)
+    if (EnableTrendContinuation)
+    {
+        CheckPositionClosure();
+    }
+
     // Gerenciar breakeven e trailing stop para posições abertas
     ManageOpenPositions();
 }
@@ -215,6 +270,11 @@ void OnTimer()
 
     // Evitar reprocessamento (timestamp < 5 segundos)
     if (json == lastProcessedJson && (currentTime - lastProcessedTime) < 5) {
+        // No new signal - check for trend continuation reentry
+        if (ShouldReenterTrend())
+        {
+            ExecuteTrendContinuation();
+        }
         return;
     }
 
@@ -227,11 +287,20 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
+//| Get signal file path based on symbol                             |
+//+------------------------------------------------------------------+
+string GetSignalFilePath()
+{
+    return "signal_" + TradingSymbol + ".json";
+}
+
+//+------------------------------------------------------------------+
 //| Read signal from JSON file                                       |
 //+------------------------------------------------------------------+
 string ReadSignalFile()
 {
-    int fileHandle = FileOpen(SignalFilePath, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
+    string signalPath = GetSignalFilePath();
+    int fileHandle = FileOpen(signalPath, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
 
     if (fileHandle == INVALID_HANDLE)
     {
@@ -541,6 +610,17 @@ void ProcessTradeSignal(string jsonData)
     Print("=== Processing Trade Signal ===");
     Print("Action: ", action);
 
+    // Reset trend continuation state on new signal
+    if (EnableTrendContinuation)
+    {
+        if (consecutiveReentries > 0)
+        {
+            Print("New signal received - resetting reentry counter from ", consecutiveReentries, " to 0");
+        }
+        consecutiveReentries = 0;
+        lastTradeWasWin = false;  // Cancel any pending reentry
+    }
+
     // 1. Fechar posições
     Print("Closing all positions for ", TradingSymbol);
     if (!CloseAllPositions())
@@ -781,6 +861,270 @@ void ApplyTrailingStop(ulong ticket)
                 }
             }
         }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if there's an open position for our symbol/magic           |
+//+------------------------------------------------------------------+
+bool HasOpenPositionForSymbol()
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if (positionInfo.SelectByIndex(i))
+        {
+            if (positionInfo.Symbol() == TradingSymbol &&
+                positionInfo.Magic() == MagicNumber)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Get current position ticket                                       |
+//+------------------------------------------------------------------+
+ulong GetCurrentPositionTicket()
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if (positionInfo.SelectByIndex(i))
+        {
+            if (positionInfo.Symbol() == TradingSymbol &&
+                positionInfo.Magic() == MagicNumber)
+            {
+                return positionInfo.Ticket();
+            }
+        }
+    }
+    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Get position direction as string                                  |
+//+------------------------------------------------------------------+
+string GetPositionDirection(ulong ticket)
+{
+    if (positionInfo.SelectByTicket(ticket))
+    {
+        if (positionInfo.PositionType() == POSITION_TYPE_BUY)
+            return "buy";
+        else if (positionInfo.PositionType() == POSITION_TYPE_SELL)
+            return "sell";
+    }
+    return "";
+}
+
+//+------------------------------------------------------------------+
+//| Check for position closure and record result                      |
+//+------------------------------------------------------------------+
+void CheckPositionClosure()
+{
+    bool currentlyHasPosition = HasOpenPositionForSymbol();
+
+    // Position was just closed
+    if (hasOpenPosition && !currentlyHasPosition)
+    {
+        // Get trade result from history
+        RecordTradeResult();
+        hasOpenPosition = false;
+        lastKnownTicket = 0;
+    }
+    // Position was just opened
+    else if (!hasOpenPosition && currentlyHasPosition)
+    {
+        hasOpenPosition = true;
+        lastKnownTicket = GetCurrentPositionTicket();
+
+        // Record direction of new position
+        if (lastKnownTicket > 0)
+        {
+            lastTradeDirection = GetPositionDirection(lastKnownTicket);
+            Print("Position opened: Ticket=", lastKnownTicket, " Direction=", lastTradeDirection);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Record result of closed trade from history                        |
+//+------------------------------------------------------------------+
+void RecordTradeResult()
+{
+    // Select deals from history for today
+    datetime startOfDay = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+    HistorySelect(startOfDay, TimeCurrent());
+
+    int totalDeals = HistoryDealsTotal();
+    double profit = 0;
+    string direction = lastTradeDirection;  // Use stored direction
+    bool foundDeal = false;
+
+    // Look for the most recent closed deal with our magic number
+    for (int i = totalDeals - 1; i >= 0; i--)
+    {
+        ulong dealTicket = HistoryDealGetTicket(i);
+        if (dealTicket > 0)
+        {
+            long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+            string dealSymbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+            long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+
+            // Only look at exit deals for our symbol/magic
+            if (dealMagic == MagicNumber &&
+                dealSymbol == TradingSymbol &&
+                dealEntry == DEAL_ENTRY_OUT)
+            {
+                profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+                profit += HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+                profit += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+
+                // Get direction from deal type
+                long dealType = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+                // DEAL_TYPE_SELL means closing a BUY, DEAL_TYPE_BUY means closing a SELL
+                if (dealType == DEAL_TYPE_SELL)
+                    direction = "buy";
+                else if (dealType == DEAL_TYPE_BUY)
+                    direction = "sell";
+
+                foundDeal = true;
+                break;
+            }
+        }
+    }
+
+    if (foundDeal)
+    {
+        lastTradeProfit = profit;
+        lastTradeWasWin = (profit > 0);
+        lastTradeDirection = direction;
+        lastTradeCloseTime = TimeCurrent();
+
+        Print("=== TRADE CLOSED ===");
+        Print("Direction: ", lastTradeDirection);
+        Print("Profit: ", lastTradeProfit);
+        Print("Result: ", lastTradeWasWin ? "WIN" : "LOSS");
+
+        if (lastTradeWasWin)
+        {
+            Print("Trend continuation timer started: ", TrendContinuationDelaySec, " seconds");
+        }
+        else
+        {
+            // Reset reentry counter on loss
+            consecutiveReentries = 0;
+            Print("Loss detected - reentry counter reset");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if should execute trend continuation reentry                |
+//+------------------------------------------------------------------+
+bool ShouldReenterTrend()
+{
+    // Feature must be enabled
+    if (!EnableTrendContinuation)
+        return false;
+
+    // Must have closed a winning trade
+    if (!lastTradeWasWin)
+        return false;
+
+    // Must not have a position open
+    if (HasOpenPositionForSymbol())
+        return false;
+
+    // Must have a valid direction
+    if (lastTradeDirection == "")
+        return false;
+
+    // Must not exceed max reentries
+    if (consecutiveReentries >= MaxConsecutiveReentries)
+    {
+        if (consecutiveReentries == MaxConsecutiveReentries)
+        {
+            Print("Max consecutive reentries reached (", MaxConsecutiveReentries, ") - waiting for new signal");
+            consecutiveReentries++;  // Increment to avoid repeating message
+        }
+        return false;
+    }
+
+    // Check time elapsed since close
+    datetime currentTime = TimeCurrent();
+    int secondsElapsed = (int)(currentTime - lastTradeCloseTime);
+
+    if (secondsElapsed < TrendContinuationDelaySec)
+        return false;
+
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate volume for reentry (with potentially lower risk)        |
+//+------------------------------------------------------------------+
+double CalculateReentryVolume()
+{
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double riskAmount = equity * (ReentryRiskPercent / 100.0);
+
+    double tickValue = SymbolInfoDouble(TradingSymbol, SYMBOL_TRADE_TICK_VALUE);
+    double point = SymbolInfoDouble(TradingSymbol, SYMBOL_POINT);
+
+    double slDistance = adjustedSLPoints * point;
+    double volume = riskAmount / (slDistance * tickValue / point);
+
+    // Normalize
+    double minLot = SymbolInfoDouble(TradingSymbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(TradingSymbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(TradingSymbol, SYMBOL_VOLUME_STEP);
+
+    volume = MathFloor(volume / lotStep) * lotStep;
+    volume = MathMax(minLot, MathMin(maxLot, volume));
+
+    Print("Reentry volume: Equity=", equity, " Risk=", riskAmount, " (", ReentryRiskPercent, "%) Volume=", volume);
+
+    return volume;
+}
+
+//+------------------------------------------------------------------+
+//| Execute trend continuation reentry                                |
+//+------------------------------------------------------------------+
+void ExecuteTrendContinuation()
+{
+    Print("=== TREND CONTINUATION REENTRY ===");
+    Print("Direction: ", lastTradeDirection);
+    Print("Reentry #", consecutiveReentries + 1, " of max ", MaxConsecutiveReentries);
+
+    double volume = CalculateReentryVolume();
+    if (volume <= 0)
+    {
+        Print("ERROR: Invalid reentry volume: ", volume);
+        return;
+    }
+
+    bool success = false;
+
+    if (lastTradeDirection == "buy")
+    {
+        success = PlaceBuyOrder(volume);
+    }
+    else if (lastTradeDirection == "sell")
+    {
+        success = PlaceSellOrder(volume);
+    }
+
+    if (success)
+    {
+        consecutiveReentries++;
+        // Reset win flag to prevent immediate re-reentry
+        lastTradeWasWin = false;
+        Print("Trend continuation successful. Total reentries: ", consecutiveReentries);
+    }
+    else
+    {
+        Print("Trend continuation FAILED");
     }
 }
 

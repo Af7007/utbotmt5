@@ -1,7 +1,13 @@
 {
+  "env": {
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7"
+  },
   "permissions": {
     "allow": [
-      "mcp__context7__get-library-docs"
+      "mcp__context7__get-library-docs",
+      "Bash(openspec validate:*)",
+      "Bash(python:*)",
+      "Bash(powershell:*)"
     ]
   }
 }

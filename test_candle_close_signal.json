@@ -1,0 +1,7 @@
+{
+  "action": "buy",
+  "timestamp": 1766074025,
+  "symbol": "XAUUSD",
+  "source": "TradingView",
+  "strategy": "trend_follow"
+}

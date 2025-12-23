@@ -10,7 +10,6 @@ app = Flask(__name__)
 # Configurações
 WEBHOOK_PORT = 8080
 MT5_COMMON_PATH = os.path.join(os.getenv('APPDATA'), 'MetaQuotes', 'Terminal', 'Common', 'Files')
-SIGNAL_FILE = os.path.join(MT5_COMMON_PATH, "signal.json")  # Arquivo compartilhado com MT5
 API_KEY = os.getenv('WEBHOOK_API_KEY', 'default-secret-key')
 
 # Mapeamento de sinais
@@ -32,44 +31,129 @@ logger.setLevel(logging.INFO)
 def receive_signal():
     """Recebe webhook externo com sinais de trading"""
 
-    # Validar JSON
-    if not request.is_json:
-        logger.error("Request is not JSON")
-        return jsonify({'error': 'Content-Type must be application/json'}), 400
+    # Log detalhado da requisição
+    logger.info(f"=== WEBHOOK REQUEST ===")
+    logger.info(f"From: {request.remote_addr}")
+    logger.info(f"Content-Type: {request.content_type}")
+    logger.info(f"Raw Data: {request.get_data(as_text=True)}")
+    print(f"[WEBHOOK] Received from {request.remote_addr}: {request.get_data(as_text=True)}")
 
-    data = request.json
+    # Tentar parsear como JSON primeiro
+    data = None
+    content_type = request.content_type or ""
 
-    # Validar campo 'action'
-    if 'action' not in data:
-        logger.error(f"Missing 'action' field: {data}")
-        return jsonify({'error': 'Missing required field: action'}), 400
+    
+    # Verificar se é JSON ou form data
+    if 'application/json' in content_type:
+        try:
+            data = request.get_json()
+            logger.info(f"Parsed JSON data: {data}")
+        except Exception as e:
+            logger.error(f"Failed to parse JSON: {e}")
+            return jsonify({'error': 'Invalid JSON format'}), 400
+    elif 'form' in content_type:
+        try:
+            data = request.form.to_dict()
+            logger.info(f"Parsed form data: {data}")
+        except Exception as e:
+            logger.error(f"Failed to parse form data: {e}")
+            return jsonify({'error': 'Invalid form data format'}), 400
+    else:
+        # Tentar como JSON mesmo assim
+        try:
+            data = request.get_json()
+            logger.info(f"Attempted JSON parsing: {data}")
+        except:
+            logger.error("Request is not JSON or form")
+            return jsonify({'error': 'Invalid data format. Use JSON or form urlencoded'}), 400
 
-    # Traduzir long/short para buy/sell
-    action = SIGNAL_MAP.get(data['action'].lower())
-    if not action:
-        logger.error(f"Invalid action: {data['action']}")
-        return jsonify({'error': f"Invalid action. Use 'long' or 'short'"}), 400
+    if data is None:
+        logger.error("No data parsed")
+        return jsonify({'error': 'No data provided'}), 400
 
-    # Criar payload normalizado
+    # Validar campo 'direction' (novo formato) ou 'action' (antigo formato)
+    direction = None
+    logger.info(f"DEBUG: Data keys: {list(data.keys())}")
+    logger.info(f"DEBUG: Has 'direction': {'direction' in data}")
+    logger.info(f"DEBUG: Has 'action': {'action' in data}")
+
+    if 'direction' in data:
+        # Novo formato: "direction": "buy" ou "sell"
+        direction = data['direction'].lower()
+        logger.info(f"DEBUG: Direction found: {direction}")
+        if direction not in ['buy', 'sell']:
+            logger.error(f"Invalid direction: {direction}")
+            return jsonify({'error': f"Invalid direction. Use 'buy' or 'sell'"}), 400
+    elif 'action' in data:
+        # Formato legado: "action": "long" ou "short"
+        action = data['action'].lower()
+        logger.info(f"DEBUG: Action found: {action}")
+        direction = SIGNAL_MAP.get(action)
+        if not direction:
+            logger.error(f"Invalid action: {action}")
+            return jsonify({'error': f"Invalid action. Use 'long' or 'short'"}), 400
+    else:
+        logger.error(f"Missing 'direction' or 'action' field: {data}")
+        return jsonify({'error': 'Missing required field: direction (or action for legacy)'}), 400
+
+    # Validar campo 'symbol' (opcional, para compatibilidade multi-símbolo)
+    symbol = data.get('symbol', 'XAUUSD')  # Default para XAUUSD se não especificado
+
+    # Validar campo 'volume' (opcional)
+    volume = data.get('volume', 0.01)  # Default de 0.01 se não especificado
+
+    # Criar payload legado com action e symbol
+    # Se veio direction, converter para action
+    if 'direction' in data:
+        payload_action = "long" if direction == "buy" else "short"
+    else:
+        payload_action = action
+
     payload = {
-        'action': action,
-        'timestamp': datetime.now(timezone.utc).isoformat()
+        'action': payload_action,  # long ou short
+        'symbol': symbol,  # Adicionar símbolo ao payload
+        'volume': volume,
+        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     }
 
-    logger.info(f"Signal received: {data['action']} -> {action}")
+    logger.info(f"DEBUG: Payload final: {payload}")
+    logger.info(f"Signal received: {payload_action} for {symbol} (volume: {volume})")
 
     # Escrever sinal em arquivo JSON
     try:
         import json
-        with open(SIGNAL_FILE, 'w') as f:
-            json.dump(payload, f)
 
-        logger.info(f"Signal written to file successfully: {payload}")
-        return jsonify({
+        # Determinar o símbolo
+        symbol = payload.get('symbol', 'XAUUSD')
+
+        # Criar nome de arquivo específico para o símbolo
+        symbol_file = f"signal_{symbol}.json"
+        signal_file_path = os.path.join(MT5_COMMON_PATH, symbol_file)
+
+        # Salvar arquivo específico para o símbolo
+        with open(signal_file_path, 'w') as f:
+            json.dump(payload, f, indent=2)
+
+        logger.info(f"Signal written to {symbol_file} for {symbol}: {payload}")
+        print(f"[WEBHOOK] Signal {payload_action} written to {symbol_file} for {symbol}")
+
+        # Também escrever no arquivo genérico signal.json para compatibilidade
+        generic_file = "signal.json"
+        generic_file_path = os.path.join(MT5_COMMON_PATH, generic_file)
+        with open(generic_file_path, 'w') as f:
+            json.dump(payload, f, indent=2)
+
+        logger.info(f"Also written to {generic_file} for compatibility")
+
+        response = jsonify({
             'status': 'success',
-            'message': f'Signal {action} written to file',
+            'message': f'Signal {payload_action} written to {symbol_file}',
+            'symbol': symbol,
             'data': payload
-        }), 200
+        })
+
+        logger.info(f"=== RESPONSE: {response.get_json()} ===")
+        return response, 200
 
     except Exception as e:
         logger.error(f"Failed to write signal to file: {e}")
@@ -82,29 +166,89 @@ def health():
 
 @app.route('/status', methods=['GET'])
 def status():
-    """Status endpoint (opcional - para monitoramento)"""
+    """Status endpoint - lista todos os arquivos de sinal específicos"""
+    import os
     import os.path
-    signal_exists = os.path.exists(SIGNAL_FILE)
 
-    last_signal = None
-    if signal_exists:
-        try:
-            import json
-            with open(SIGNAL_FILE, 'r') as f:
-                last_signal = json.load(f)
-        except:
-            pass
+    # Listar todos os arquivos signal_*.json
+    signal_files = {}
+    try:
+        if os.path.exists(MT5_COMMON_PATH):
+            for filename in os.listdir(MT5_COMMON_PATH):
+                if filename.startswith('signal_') and filename.endswith('.json'):
+                    file_path = os.path.join(MT5_COMMON_PATH, filename)
+                    try:
+                        import json
+                        with open(file_path, 'r') as f:
+                            signal_files[filename] = json.load(f)
+                    except:
+                        signal_files[filename] = {'error': 'Could not read file'}
+    except Exception as e:
+        return jsonify({'error': f'Failed to list signals: {e}'}), 500
 
     return jsonify({
         'status': 'running',
-        'signal_file': SIGNAL_FILE,
-        'signal_exists': signal_exists,
-        'last_signal': last_signal,
+        'signal_files': signal_files,
+        'signal_count': len(signal_files),
+        'mt5_path': MT5_COMMON_PATH,
         'timestamp': datetime.now(timezone.utc).isoformat()
     }), 200
 
+@app.route('/examples', methods=['GET'])
+def examples():
+    """Exemplos de uso do webhook"""
+    examples = {
+        'buy_signal': {
+            'method': 'POST',
+            'url': f'http://localhost:{WEBHOOK_PORT}/sinais',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {
+                'direction': 'buy',
+                'symbol': 'BTCUSD',
+                'volume': 0.01
+            }
+        },
+        'sell_signal': {
+            'method': 'POST',
+            'url': f'http://localhost:{WEBHOOK_PORT}/sinais',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {
+                'direction': 'sell',
+                'symbol': 'XAUUSD',
+                'volume': 0.1
+            }
+        },
+        'legacy_long': {
+            'method': 'POST',
+            'url': f'http://localhost:{WEBHOOK_PORT}/sinais',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {
+                'action': 'long'
+            }
+        },
+        'legacy_short': {
+            'method': 'POST',
+            'url': f'http://localhost:{WEBHOOK_PORT}/sinais',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {
+                'action': 'short'
+            }
+        }
+    }
+
+    return jsonify({
+        'status': 'examples',
+        'supported_symbols': ['BTCUSD', 'XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'],
+        'examples': examples,
+        'note': 'Use direction (buy/sell) para novo formato ou action (long/short) para formato legado. O comentário da ordem é gerado automaticamente pelo EA (ex: buy:BTCUSDc)'
+    }), 200
+
 if __name__ == '__main__':
-    logger.info("Starting webhook receiver...")
-    logger.info(f"Signal file path: {SIGNAL_FILE}")
-    print(f"Signal file will be written to: {SIGNAL_FILE}")
+    logger.info("Starting webhook receiver v2.0 (multi-symbol support)...")
+    logger.info(f"Signal directory: {MT5_COMMON_PATH}")
+    logger.info(f"Signal format: signal_{{SYMBOL}}.json (ex: signal_XAUUSD.json)")
+    logger.info(f"Available endpoints: /sinais, /health, /status, /examples")
+    print(f"Signal files will be written to: {MT5_COMMON_PATH}")
+    print(f"Format: signal_SYMBOL.json (e.g., signal_XAUUSD.json)")
+    print(f"Access examples at: http://localhost:{WEBHOOK_PORT}/examples")
     app.run(host='0.0.0.0', port=WEBHOOK_PORT, debug=False)
