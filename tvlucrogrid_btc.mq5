@@ -1,6 +1,6 @@
 ﻿//+------------------------------------------------------------------+
-//| TVLucroGrid EA v1.0 - Grid Strategy with Profit Target           |
-//| Expert Advisor that opens orders every 5 seconds until $100 target |
+//| TVLucroGrid EA BTC v1.0 - Grid Strategy with Profit Target       |
+//| Expert Advisor for BTCUSD with hedge and martingale                |
 //| Compatible with existing webhook receiver                           |
 //+------------------------------------------------------------------+
 #property copyright "TVLucroGrid Automation"
@@ -13,38 +13,38 @@
 #include <Trade\PositionInfo.mqh>
 
 //--- Input Parameters - Basic Settings
-input string   TradingSymbol = "XAUUSD";         // Symbol to trade
-input int      MagicNumber = 54321;           // Magic number (different from tvlucro)
+input string   TradingSymbol = "BTCUSD";       // Symbol to trade
+input int      MagicNumber = 54322;           // Magic number for BTC (different from XAUUSD)
 input double   RiskPercent = 1.0;             // % of equity per order
-input bool     UseFixedLots = true;           // Use fixed lots instead of risk % - CHANGED TO TRUE
+input bool     UseFixedLots = true;           // Use fixed lots instead of risk %
 input double   FixedLotSize = 0.01;           // Fixed lot size (if UseFixedLots=true)
 input bool     ValidateLotSize = true;        // Validate broker lot limits
-input int      TakeProfitPoints = 1000;        // TP in points (e.g., 1000 = $10 for XAUUSD)
-input int      StopLossPoints = 1000;           // SL in points (e.g., 500 = $5 for XAUUSD)
+input int      TakeProfitPoints = 5000;       // TP in points (adjusted for BTC volatility)
+input int      StopLossPoints = 5000;         // SL in points (adjusted for BTC volatility)
 
 //--- Grid Settings
 input int      PollingIntervalSec = 0;        // Signal polling frequency (seconds) - 0 = FASTEST
-input string   SignalFilePath = "signal_XAUUSD.json"; // Signal file path (works for both XAUUSD and XAUUSDc)
-input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds) - FASTER FOR HEDGE
-input double   ProfitTargetMoney = 20.0;      // Total profit target ($) - REDUCED FOR SAFETY
-input int      MaxGridOrders = 10;             // Maximum orders per direction - REDUCED FOR SAFETY
+input string   SignalFilePath = "signal_BTCUSD.json"; // Signal file path (works for both BTCUSD and BTCUSDc)
+input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds)
+input double   ProfitTargetMoney = 10.0;      // Total profit target ($) - LOWER FOR BTC
+input int      MaxGridOrders = 10;             // Maximum orders per direction
 input bool     CloseAllOnTarget = true;        // Close all when target reached
 
 //--- Hedge Strategy (NEVER closes in loss, always waits for profit)
 input bool     EnableHedgeMode = true;         // Enable hedge mode (opens new direction without closing old)
-input double   HedgeProfitTarget = 50.0;       // Close ALL when total profit reaches this amount ($) - INCREASED FOR MORE MARTINGALE
-input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions - DEFAULT 1.5x (SAFER)
+input double   HedgeProfitTarget = 30.0;       // Close ALL when total profit reaches this amount ($)
+input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions - 1.5x
 
 //--- Protection
-input double   MaxDrawdownPercent = 5.0;      // Maximum drawdown (% of equity) - REDUCED FOR SAFETY
-input double   MaxLossPerOrder = 10.0;         // Maximum loss per order ($) - REDUCED
+input double   MaxDrawdownPercent = 5.0;      // Maximum drawdown (% of equity)
+input double   MaxLossPerOrder = 10.0;         // Maximum loss per order ($)
 input double   MaxDailyLoss = 50.0;            // Maximum daily loss ($) - Stop trading if reached
 
 //--- Trailing Stop
 input bool     EnableTrailingStop = true;      // Enable trailing stop for profitable positions
-input int      TrailingStartPoints = 200;      // Start trailing after X points profit
-input int      TrailingStopPoints = 100;       // Trailing stop distance in points
-input int      TrailingStepPoints = 50;        // Move SL every X points
+input int      TrailingStartPoints = 1000;     // Start trailing after X points profit (BTC)
+input int      TrailingStopPoints = 500;       // Trailing stop distance in points (BTC)
+input int      TrailingStepPoints = 200;       // Move SL every X points (BTC)
 
 //--- Visual Panel
 input bool     ShowInfoPanel = true;           // Show info panel
@@ -53,7 +53,7 @@ input int      PanelY = 50;
 input int      PanelWidth = 220;
 
 //--- Global Variables - Grid State
-string activeSymbol = "";              // Active symbol (from chart, auto-detects XAUUSD/XAUUSDc)
+string activeSymbol = "";              // Active symbol (from chart, auto-detects BTCUSD/BTCUSDc)
 string currentDirection = "";          // Current direction: "buy" or "sell"
 datetime lastGridOrderTime = 0;        // Last grid order timestamp
 int currentGridLevel = 0;              // Current grid level (order count)
@@ -98,11 +98,11 @@ int OnInit()
     trade.SetDeviationInPoints(10);
     trade.SetTypeFilling(ORDER_FILLING_IOC);
 
-    // Use the symbol from the current chart (auto-detects XAUUSD or XAUUSDc)
+    // Use the symbol from the current chart (auto-detects BTCUSD or BTCUSDc)
     activeSymbol = _Symbol;
     symbolInfo.Name(activeSymbol);
 
-    Print("=== TVLucroGrid EA v1.0 Started ===");
+    Print("=== TVLucroGrid EA BTC v1.0 Started ===");
     Print("Chart Symbol: ", activeSymbol, " (configured: ", TradingSymbol, ")");
     Print("Magic Number: ", MagicNumber);
     Print("Grid Interval: ", GridIntervalSeconds, " seconds");
@@ -150,7 +150,7 @@ void OnDeinit(const int reason)
     //    DeleteInfoPanel();
     //}
 
-    Print("=== TVLucroGrid EA v1.0 Stopped ===");
+    Print("=== TVLucroGrid EA BTC v1.0 Stopped ===");
     Print("Reason: ", reason);
 }
 

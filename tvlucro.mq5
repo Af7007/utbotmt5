@@ -1,12 +1,12 @@
-// TVLucro EA v4.6 - Hedge Trailing Stop
+// TVLucro EA v4.8 - Martingale Hedge Fix
 // Expert Advisor with chart layout detection and trading prevention
 // Lê sinais de arquivo JSON escrito pelo Flask
 
 #property copyright "MT5 Webhook Automation"
 #property link      "https://github.com"
-#property version   "4.6"
+#property version   "4.8"
 //#property strict
-#property description "TVLucro EA v4.5 with Trend Marker"
+#property description "TVLucro EA v4.8 - Modern Panel + Martingale Hedge Fix"
 
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>
@@ -1402,16 +1402,20 @@ string GetTrendArrow(string direction)
 }
 
 //+------------------------------------------------------------------+
-//| Get trend color based on direction                               |
+//| Get trend color based on direction - Modern Colors                |
 //+------------------------------------------------------------------+
 color GetTrendColor(string direction)
 {
+    color colorGreen = (color)0xA3BE8C;         // Muted green
+    color colorRed = (color)0xBF616A;           // Soft red
+    color textDimColor = (color)0x4C566A;       // Dim gray
+
     if (direction == "UP")
-        return clrLime;
+        return colorGreen;
     else if (direction == "DOWN")
-        return clrRed;
+        return colorRed;
     else
-        return clrGray;
+        return textDimColor;
 }
 
 //+------------------------------------------------------------------+
@@ -2659,10 +2663,56 @@ void ProcessTradeSignal(string jsonData, bool forceClosePositions = true, bool i
             return; // Não executar lógica normal
         }
 
-        // Se está em modo hedge mas recebeu mesmo sinal ou posição em lucro
+        // Se está em modo hedge, verificar se deve adicionar novo nível de martingale
         if (isInHedgeMode)
         {
-            Print("In hedge mode but conditions changed - continuing normal flow");
+            // Verificar se podemos abrir mais um nível
+            if (currentHedgeLevel < MaxHedgeLevels)
+            {
+                // Verificar se ainda estamos em prejuízo
+                if (IsAnyPositionInLoss())
+                {
+                    // Determinar a direção do hedge atual
+                    // Se a última ação foi BUY, o hedge é SELL, e vice-versa
+                    string hedgeDirection = (lastAction == "buy") ? "sell" : "buy";
+
+                    // Se o sinal é na MESMA direção do hedge atual, adicionar nível de martingale
+                    if (action == hedgeDirection)
+                    {
+                        Print("=== ADDITIONAL HEDGE LEVEL ===");
+                        Print("Current Level: ", currentHedgeLevel, " Opening Level: ", currentHedgeLevel + 1);
+                        Print("Signal direction matches hedge - adding martingale level");
+
+                        if (OpenHedgePosition(action))
+                        {
+                            Print("=== ADDITIONAL HEDGE OPENED ===");
+                            Print("New hedge level: ", currentHedgeLevel);
+                        }
+                        else
+                        {
+                            Print("ADDITIONAL HEDGE FAILED - Check logs");
+                        }
+
+                        return; // Não executar lógica normal
+                    }
+                    else
+                    {
+                        Print("In hedge mode - signal is opposite direction (", action, " vs ", hedgeDirection, ")");
+                        Print("Ignoring signal while in hedge mode with opposite direction");
+                        return; // Não executar lógica normal
+                    }
+                }
+                else
+                {
+                    Print("In hedge mode - positions are profitable, ignoring signal");
+                    return; // Não executar lógica normal
+                }
+            }
+            else
+            {
+                Print("In hedge mode - max levels reached (", currentHedgeLevel, "/", MaxHedgeLevels, ")");
+                return; // Não executar lógica normal
+            }
         }
     }
 
@@ -3287,45 +3337,58 @@ string TimeframeToString(ENUM_TIMEFRAMES tf)
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| Create info panel on chart                                        |
+//| Create info panel on chart - Modern Design                        |
 //+------------------------------------------------------------------+
 bool CreateInfoPanel()
 {
     if (!ShowInfoPanel || panelInitialized)
         return true;
 
-    // Create background rectangle
+    // Modern color palette
+    color bgPanelColor = (color)0x1E1E2E;       // Dark blue-gray background
+    color borderColor = (color)0x3B4252;        // Subtle border
+    color headerColor = (color)0xEBCB8B;        // Soft gold
+    color textMainColor = (color)0xECEFF4;      // Off-white
+    color textMutedColor = (color)0x88C0D0;     // Soft cyan
+    color textDimColor = (color)0x4C566A;       // Dim gray
+    color colorGreen = (color)0xA3BE8C;         // Muted green
+    color colorRed = (color)0xBF616A;           // Soft red
+    color colorBlue = (color)0x81A1C1;          // Muted blue
+    color colorYellow = (color)0xEBCB8B;        // Soft yellow (same as header)
+    color colorOrange = (color)0xD08770;        // Soft orange
+
+    // Create background rectangle with rounded effect
     ObjectCreate(0, panelPrefix + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
     ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_XDISTANCE, PanelX);
     ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_YDISTANCE, PanelY);
     ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_XSIZE, PanelWidth);
-    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_YSIZE, 395);  // Increased by 75px total for Scalping
-    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_BGCOLOR, clrBlack);
-    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_BORDER_COLOR, clrDarkGray);
+    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_YSIZE, 420);  // Increased for better spacing
+    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_BGCOLOR, bgPanelColor);
+    ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_BORDER_COLOR, borderColor);
     ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
     ObjectSetInteger(0, panelPrefix + "BG", OBJPROP_BACK, false);
 
     // Create header label
     ObjectCreate(0, panelPrefix + "Header", OBJ_LABEL, 0, 0, 0);
-    string headerVersion = "TVLucro EA v4.5 - " + TradingSymbol;
+    string headerVersion = "TVLucro v4.8 - " + TradingSymbol;
     if (EnablePositiveScalping)
     {
-        headerVersion += " | Positive Scalping: ON";
+        headerVersion += " | Scalping: ON";
     }
     ObjectSetString(0, panelPrefix + "Header", OBJPROP_TEXT, headerVersion);
-    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_YDISTANCE, PanelY + 10);
-    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_COLOR, clrGold);
+    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_YDISTANCE, PanelY + 12);
+    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_COLOR, headerColor);
     ObjectSetString(0, panelPrefix + "Header", OBJPROP_FONT, "Arial Bold");
-    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_FONTSIZE, 12);
+    ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_FONTSIZE, 11);
     ObjectSetInteger(0, panelPrefix + "Header", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create symbol info label
     ObjectCreate(0, panelPrefix + "SymbolInfo", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_YDISTANCE, PanelY + 25);
+    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_YDISTANCE, PanelY + 28);
     ObjectSetString(0, panelPrefix + "SymbolInfo", OBJPROP_TEXT, "Symbol: " + TradingSymbol + " | Signal: " + (signalHasSymbol ? signalSymbol : "any"));
-    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, clrLightGray);
+    ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, textMutedColor);
     ObjectSetString(0, panelPrefix + "SymbolInfo", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_FONTSIZE, 8);
     ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -3335,113 +3398,112 @@ bool CreateInfoPanel()
     {
         // Create trend background highlight
         ObjectCreate(0, panelPrefix + "TrendBG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_XDISTANCE, PanelX + 5);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_YDISTANCE, PanelY + 50);  // Adjusted for new info line
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_XSIZE, PanelWidth - 10);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_YSIZE, 30);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_BGCOLOR, clrNONE);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_BORDER_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_XDISTANCE, PanelX + 6);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_YDISTANCE, PanelY + 48);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_XSIZE, PanelWidth - 12);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_YSIZE, 28);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_BGCOLOR, (color)0x2E3440);
+        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_BORDER_COLOR, (color)0x434C5E);
         ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
         ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_BACK, true);
-        ObjectSetInteger(0, panelPrefix + "TrendBG", OBJPROP_STATE, 0);
 
         // Create trend arrow label
         ObjectCreate(0, panelPrefix + "TrendArrow", OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_XDISTANCE, PanelX + 10);
-        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_YDISTANCE, PanelY + 55);  // Adjusted
+        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_XDISTANCE, PanelX + 12);
+        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_YDISTANCE, PanelY + 54);
         ObjectSetString(0, panelPrefix + "TrendArrow", OBJPROP_TEXT, "→");
-        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_COLOR, textDimColor);
         ObjectSetString(0, panelPrefix + "TrendArrow", OBJPROP_FONT, "Arial Bold");
-        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_FONTSIZE, 16);
+        ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_FONTSIZE, 14);
         ObjectSetInteger(0, panelPrefix + "TrendArrow", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
         // Create trend text label
         ObjectCreate(0, panelPrefix + "TrendText", OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_XDISTANCE, PanelX + 35);
-        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_YDISTANCE, PanelY + 58);  // Adjusted
+        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_XDISTANCE, PanelX + 36);
+        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_YDISTANCE, PanelY + 56);
         ObjectSetString(0, panelPrefix + "TrendText", OBJPROP_TEXT, "TREND: NEUTRAL");
-        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_COLOR, textDimColor);
         ObjectSetString(0, panelPrefix + "TrendText", OBJPROP_FONT, "Arial Bold");
-        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_FONTSIZE, 10);
+        ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_FONTSIZE, 9);
         ObjectSetInteger(0, panelPrefix + "TrendText", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
         // Create trend strength label
         ObjectCreate(0, panelPrefix + "TrendStrength", OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_XDISTANCE, PanelX + 150);
-        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_YDISTANCE, PanelY + 58);  // Adjusted
+        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_XDISTANCE, PanelX + 145);
+        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_YDISTANCE, PanelY + 56);
         ObjectSetString(0, panelPrefix + "TrendStrength", OBJPROP_TEXT, "");
-        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_COLOR, textDimColor);
         ObjectSetString(0, panelPrefix + "TrendStrength", OBJPROP_FONT, "Arial");
         ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_FONTSIZE, 8);
         ObjectSetInteger(0, panelPrefix + "TrendStrength", OBJPROP_CORNER, CORNER_LEFT_UPPER);
     }
 
-    // Create status labels for each strategy
-    CreateStatusLabel("Hedge", PanelY + 85);   // Adjusted Y position
-    CreateStatusLabel("Trend", PanelY + 110);
-    CreateStatusLabel("Candle", PanelY + 135);
-    CreateStatusLabel("Close", PanelY + 160);
-    CreateStatusLabel("Scalping", PanelY + 185);  // Added Positive Scalping label
+    // Create status labels for each strategy (25px spacing)
+    CreateStatusLabel("Hedge", PanelY + 85);
+    CreateStatusLabel("Trend", PanelY + 112);
+    CreateStatusLabel("Candle", PanelY + 139);
+    CreateStatusLabel("Close", PanelY + 166);
+    CreateStatusLabel("Scalping", PanelY + 193);
 
-    // Create chart status label
+    // Create chart status label (moved down to avoid overlap)
     ObjectCreate(0, panelPrefix + "ChartStatus", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_YDISTANCE, PanelY + 175);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrLime);
+    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_YDISTANCE, PanelY + 220);
+    ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorGreen);
     ObjectSetString(0, panelPrefix + "ChartStatus", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create position info label
     ObjectCreate(0, panelPrefix + "PosInfo", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_YDISTANCE, PanelY + 205);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, clrLime);
+    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_YDISTANCE, PanelY + 250);
+    ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, colorGreen);
     ObjectSetString(0, panelPrefix + "PosInfo", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create performance label
     ObjectCreate(0, panelPrefix + "PerfInfo", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_YDISTANCE, PanelY + 235);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_COLOR, clrAqua);
+    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_YDISTANCE, PanelY + 280);
+    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_COLOR, colorBlue);
     ObjectSetString(0, panelPrefix + "PerfInfo", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create config label
     ObjectCreate(0, panelPrefix + "ConfInfo", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_YDISTANCE, PanelY + 265);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_COLOR, clrGray);
+    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_YDISTANCE, PanelY + 310);
+    ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_COLOR, textDimColor);
     ObjectSetString(0, panelPrefix + "ConfInfo", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + "ConfInfo", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create last action label
     ObjectCreate(0, panelPrefix + "LastAction", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_YDISTANCE, PanelY + 295);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_COLOR, clrYellow);
+    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_YDISTANCE, PanelY + 340);
+    ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_COLOR, colorYellow);
     ObjectSetString(0, panelPrefix + "LastAction", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + "LastAction", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create last signal label
     ObjectCreate(0, panelPrefix + "LastSignal", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_YDISTANCE, PanelY + 315);  // Adjusted
-    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_COLOR, clrGray);
+    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_YDISTANCE, PanelY + 362);
+    ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_COLOR, textDimColor);
     ObjectSetString(0, panelPrefix + "LastSignal", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_FONTSIZE, 8);
     ObjectSetInteger(0, panelPrefix + "LastSignal", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
     // Create timestamp label
     ObjectCreate(0, panelPrefix + "Timestamp", OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_XDISTANCE, PanelX + 10);
-    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_YDISTANCE, PanelY + 325);
-    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_COLOR, clrDarkGray);
+    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_XDISTANCE, PanelX + 12);
+    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_YDISTANCE, PanelY + 380);
+    ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_COLOR, (color)0x4C566A);
     ObjectSetString(0, panelPrefix + "Timestamp", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_FONTSIZE, 8);
     ObjectSetInteger(0, panelPrefix + "Timestamp", OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -3452,16 +3514,20 @@ bool CreateInfoPanel()
 }
 
 //+------------------------------------------------------------------+
-//| Create status label for strategies                                  |
+//| Create status label for strategies - Modern Colors                |
 //+------------------------------------------------------------------+
 void CreateStatusLabel(string name, int y)
 {
+    // Modern colors
+    color textDimColor = (color)0x4C566A;       // Dim gray
+    color colorRed = (color)0xBF616A;           // Soft red
+
     // Create label
     ObjectCreate(0, panelPrefix + name + "Label", OBJ_LABEL, 0, 0, 0);
     ObjectSetString(0, panelPrefix + name + "Label", OBJPROP_TEXT, name + ":");
-    ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_XDISTANCE, PanelX + 10);
+    ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_XDISTANCE, PanelX + 12);
     ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_YDISTANCE, y);
-    ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, clrGray);
+    ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, textDimColor);
     ObjectSetString(0, panelPrefix + name + "Label", OBJPROP_FONT, "Arial");
     ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -3469,16 +3535,16 @@ void CreateStatusLabel(string name, int y)
     // Create value
     ObjectCreate(0, panelPrefix + name + "Value", OBJ_LABEL, 0, 0, 0);
     ObjectSetString(0, panelPrefix + name + "Value", OBJPROP_TEXT, "OFF");
-    ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_XDISTANCE, PanelX + 80);
+    ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_XDISTANCE, PanelX + 82);
     ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_YDISTANCE, y);
-    ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, clrRed);
+    ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, colorRed);
     ObjectSetString(0, panelPrefix + name + "Value", OBJPROP_FONT, "Arial Bold");
     ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_FONTSIZE, 9);
     ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_CORNER, CORNER_LEFT_UPPER);
 }
 
 //+------------------------------------------------------------------+
-//| Update info panel data                                            |
+//| Update info panel data - Modern Colors                            |
 //+------------------------------------------------------------------+
 void UpdatePanel()
 {
@@ -3489,6 +3555,14 @@ void UpdatePanel()
     // Update only at specified interval
     if ((currentTime - lastPanelUpdate) < PanelUpdateInterval)
         return;
+
+    // Modern colors
+    color textMutedColor = (color)0x88C0D0;     // Soft cyan
+    color textDimColor = (color)0x4C566A;       // Dim gray
+    color colorGreen = (color)0xA3BE8C;         // Muted green
+    color colorRed = (color)0xBF616A;           // Soft red
+    color colorYellow = (color)0xEBCB8B;        // Soft yellow
+    color colorOrange = (color)0xD08770;        // Soft orange
 
     lastPanelUpdate = currentTime;
 
@@ -3520,12 +3594,12 @@ void UpdatePanel()
     if (signalHasSymbol && signalSymbol != TradingSymbol)
     {
         ObjectSetString(0, panelPrefix + "SymbolInfo", OBJPROP_TEXT, "Symbol: " + TradingSymbol + " | Signal: " + signalDisplay + " (IGNORED)");
-        ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, clrRed);
+        ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, colorRed);
     }
     else
     {
         ObjectSetString(0, panelPrefix + "SymbolInfo", OBJPROP_TEXT, "Symbol: " + TradingSymbol + " | Signal: " + signalDisplay);
-        ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, clrLightGray);
+        ObjectSetInteger(0, panelPrefix + "SymbolInfo", OBJPROP_COLOR, textMutedColor);
     }
 
     // Update strategy statuses
@@ -3565,17 +3639,17 @@ void UpdatePanel()
         if (!AllowSideChart && IsSideChart())
         {
             chartStatus = "CHART: SIDE MODE - BLOCKED";
-            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrRed);
+            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorRed);
         }
         else if (CheckChartSize && (width < MinChartWidth || height < MinChartHeight))
         {
             chartStatus = "CHART: TOO SMALL (" + IntegerToString(width) + "x" + IntegerToString(height) + ")";
-            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrOrange);
+            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorOrange);
         }
         else
         {
             chartStatus = "CHART: BLOCKED";
-            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrRed);
+            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorRed);
         }
     }
     else
@@ -3583,12 +3657,12 @@ void UpdatePanel()
         if (AllowSideChart && IsSideChart())
         {
             chartStatus = "CHART: SIDE MODE ENABLED";
-            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrYellow);
+            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorYellow);
         }
         else
         {
             chartStatus = "CHART: NORMAL (" + IntegerToString(width) + "x" + IntegerToString(height) + ")";
-            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, panelPrefix + "ChartStatus", OBJPROP_COLOR, colorGreen);
         }
     }
     ObjectSetString(0, panelPrefix + "ChartStatus", OBJPROP_TEXT, chartStatus);
@@ -3613,7 +3687,7 @@ void UpdatePanel()
     if (openPositions > 0)
     {
         posInfo = "POS: " + IntegerToString(openPositions) + " | PL: " + DoubleToString(currentPL, 2);
-        ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, currentPL >= 0 ? clrLime : clrRed);
+        ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, currentPL >= 0 ? colorGreen : colorRed);
 
         // Add scalping direction info if in positive scalping mode
         if (isInPositiveScalping && scalpingDirection != "")
@@ -3624,14 +3698,14 @@ void UpdatePanel()
     else
     {
         posInfo = "NO POSITIONS";
-        ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + "PosInfo", OBJPROP_COLOR, textDimColor);
     }
     ObjectSetString(0, panelPrefix + "PosInfo", OBJPROP_TEXT, posInfo);
 
     // Update performance info
     string perfInfo = "Trades: " + IntegerToString(dailyTradeCount) + " | Daily: " + DoubleToString(totalDailyPL, 2);
     ObjectSetString(0, panelPrefix + "PerfInfo", OBJPROP_TEXT, perfInfo);
-    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_COLOR, totalDailyPL >= 0 ? clrLime : clrRed);
+    ObjectSetInteger(0, panelPrefix + "PerfInfo", OBJPROP_COLOR, totalDailyPL >= 0 ? colorGreen : colorRed);
 
     // Update config info
     string lotMode = UseFixedLots ? "FIXED: " + DoubleToString(FixedLotSize, 2) : "RISK: " + DoubleToString(RiskPercent, 1) + "%";
@@ -3666,24 +3740,30 @@ void UpdatePanel()
 }
 
 //+------------------------------------------------------------------+
-//| Update individual strategy status                                  |
+//| Update individual strategy status - Modern Colors                 |
 //+------------------------------------------------------------------+
 void UpdateStrategyStatus(string name, bool enabled, string value)
 {
     if (!ObjectFind(0, panelPrefix + name + "Value"))
         return;
 
+    // Modern colors
+    color textDimColor = (color)0x4C566A;       // Dim gray
+    color colorGreen = (color)0xA3BE8C;         // Muted green
+    color colorRed = (color)0xBF616A;           // Soft red
+    color colorDarkerGray = (color)0x3B4252;    // Darker gray for disabled
+
     ObjectSetString(0, panelPrefix + name + "Value", OBJPROP_TEXT, value);
 
     if (!enabled)
     {
-        ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, clrRed);
-        ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, clrDarkGray);
+        ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, colorRed);
+        ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, colorDarkerGray);
     }
     else
     {
-        ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, clrLime);
-        ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, clrGray);
+        ObjectSetInteger(0, panelPrefix + name + "Value", OBJPROP_COLOR, colorGreen);
+        ObjectSetInteger(0, panelPrefix + name + "Label", OBJPROP_COLOR, textDimColor);
     }
 }
 

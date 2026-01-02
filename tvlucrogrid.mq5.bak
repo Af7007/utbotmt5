@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //| TVLucroGrid EA v1.0 - Grid Strategy with Profit Target           |
 //| Expert Advisor that opens orders every 5 seconds until $100 target |
 //| Compatible with existing webhook receiver                           |
@@ -20,25 +20,42 @@ input bool     UseFixedLots = true;           // Use fixed lots instead of risk 
 input double   FixedLotSize = 0.01;           // Fixed lot size (if UseFixedLots=true)
 input bool     ValidateLotSize = true;        // Validate broker lot limits
 input int      TakeProfitPoints = 1000;        // TP in points (e.g., 1000 = $10 for XAUUSD)
-input int      StopLossPoints = 1000;           // SL in points (e.g., 500 = $5 for XAUUSD)
+input int      StopLossPoints = 500;           // SL in points (e.g., 500 = $5 for XAUUSD)
 
 //--- Grid Settings
-input int      PollingIntervalSec = 0;        // Signal polling frequency (seconds) - 0 = FASTEST
+input int      PollingIntervalSec = 1;        // Signal polling frequency (seconds)
 input string   SignalFilePath = "signal_XAUUSD.json"; // Signal file path (works for both XAUUSD and XAUUSDc)
-input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds) - FASTER FOR HEDGE
-input double   ProfitTargetMoney = 20.0;      // Total profit target ($) - REDUCED FOR SAFETY
-input int      MaxGridOrders = 10;             // Maximum orders per direction - REDUCED FOR SAFETY
+input int      GridIntervalSeconds = 5;       // Interval between grid orders (seconds)
+input double   ProfitTargetMoney = 100.0;     // Total profit target ($)
+input int      MaxGridOrders = 20;            // Maximum orders per direction
 input bool     CloseAllOnTarget = true;        // Close all when target reached
+
+//--- Reversal Settings
+input bool     EnableAutoReverse = true;       // Enable automatic reversal
+input double   MinProfitToReverse = 50.0;     // Minimum profit to consider reversal ($)
+input bool     RequireOppositeSignal = true;   // Require opposite signal to reverse
+input int      ReversalConfirmationCandles = 3; // Confirmation candles
+
+//--- Trend Detection
+input bool     EnableTrendDetection = true;    // Enable trend-based reversal
+input int      TrendCheckCandles = 3;          // Number of candles to check for trend
+input bool     RequireConsecutiveCandles = true; // All candles must be in same direction
+input int      AgainstTrendThreshold = 2;      // Stop adding if X candles against current position
+input bool     ReverseOnTrendRegardlessProfit = false; // Reverse on trend even WITHOUT minimum profit
 
 //--- Hedge Strategy (NEVER closes in loss, always waits for profit)
 input bool     EnableHedgeMode = true;         // Enable hedge mode (opens new direction without closing old)
-input double   HedgeProfitTarget = 50.0;       // Close ALL when total profit reaches this amount ($) - INCREASED FOR MORE MARTINGALE
-input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions - DEFAULT 1.5x (SAFER)
+input double   HedgeProfitTarget = 30.0;       // Close ALL when total profit reaches this amount ($)
+input int      MaxHedgeDurationMinutes = 60;    // Maximum time in hedge mode before forced close (0 = no limit)
+input bool     CloseHedgeOnBreakeven = true;    // Close all positions if total profit >= 0 while in hedge
+
+//--- Debug & Testing
+input bool     ForceResetOnNewSignal = false;  // Force reset state when ANY new signal arrives (ignore lastProcessed) - WARNING: Can close losing positions!
 
 //--- Protection
-input double   MaxDrawdownPercent = 5.0;      // Maximum drawdown (% of equity) - REDUCED FOR SAFETY
-input double   MaxLossPerOrder = 10.0;         // Maximum loss per order ($) - REDUCED
-input double   MaxDailyLoss = 50.0;            // Maximum daily loss ($) - Stop trading if reached
+input double   MaxDrawdownPercent = 10.0;     // Maximum drawdown (% of equity)
+input double   MaxLossPerOrder = 20.0;         // Maximum loss per order ($)
+input bool     EnableEmergencyClose = true;    // Emergency close all
 
 //--- Trailing Stop
 input bool     EnableTrailingStop = true;      // Enable trailing stop for profitable positions
@@ -69,13 +86,12 @@ int hedgeNewLevel = 0;                 // Grid level in NEW direction (hedge ord
 string lastProcessedJson = "";         // Last processed JSON
 datetime lastSignalTime = 0;           // Last signal timestamp
 string pendingDirection = "";          // Pending direction for reversal
+datetime lastSignalProcessedTime = 0;  // When last signal was processed (for cooldown)
 
 //--- Statistics
 int totalOrdersOpened = 0;            // Total orders opened in session
 double maxProfitReached = 0;          // Maximum profit reached
 double maxDrawdownReached = 0;        // Maximum drawdown reached
-double dailyStartBalance = 0;         // Account balance at start of day
-bool tradingStopped = false;           // Trading stopped if daily loss limit reached
 
 //--- Trade Objects
 CTrade trade;
@@ -108,7 +124,6 @@ int OnInit()
     Print("Grid Interval: ", GridIntervalSeconds, " seconds");
     Print("Profit Target: $", ProfitTargetMoney);
     Print("Max Grid Orders: ", MaxGridOrders);
-    Print("Hedge Lot Multiplier: x", HedgeLotMultiplier);
 
     // Verify symbol info is valid
     if (!symbolInfo.RefreshRates())
@@ -159,60 +174,12 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-    // DAILY LOSS LIMIT: Check if we hit the daily loss limit
-    static datetime lastDayCheck = 0;
-    datetime currentTime = TimeCurrent();
-
-    // Reset daily balance at start of new day
-    MqlDateTime timeStruct;
-    TimeToStruct(currentTime, timeStruct);
-    if (timeStruct.hour == 0 && timeStruct.min == 0 && timeStruct.sec == 0)
-    {
-        dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-        tradingStopped = false;
-        Print("=== NEW DAY === Daily balance reset to: $", dailyStartBalance);
-    }
-
-    // Initialize daily balance on first run
-    if (dailyStartBalance == 0)
-    {
-        dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    }
-
-    // Check if daily loss limit exceeded
-    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double dailyPnL = currentBalance - dailyStartBalance;
-
-    if (dailyPnL < -MaxDailyLoss && !tradingStopped)
-    {
-        Print("========================================");
-        Print("!!! MAXIMUM DAILY LOSS REACHED !!!");
-        Print("Daily P&L: $", dailyPnL, " Limit: $", -MaxDailyLoss);
-        Print("TRADING STOPPED. EA will not open more orders today.");
-        Print("========================================");
-        tradingStopped = true;
-        CloseAllPositions();
-        return;
-    }
-
-    // Don't trade if stopped
-    if (tradingStopped)
-    {
-        static datetime lastStoppedLog = 0;
-        if (currentTime - lastStoppedLog >= 60)
-        {
-            Print("TRADING STOPPED - Daily loss: $", dailyPnL, " Limit: $", -MaxDailyLoss);
-            lastStoppedLog = currentTime;
-        }
-        return;
-    }
-
     // HEARTBEAT: Show EA is running every 30 seconds
     static datetime lastHeartbeat = 0;
+    datetime currentTime = TimeCurrent();
     if (currentTime - lastHeartbeat >= 30)
     {
-        double dailyPnL = AccountInfoDouble(ACCOUNT_BALANCE) - dailyStartBalance;
-        Print("=== HEARTBEAT === EA running | Dir: ", currentDirection, " | Hedge: ", inHedgeMode ? "YES" : "NO", " | Daily P&L: $", dailyPnL);
+        Print("=== HEARTBEAT === EA is running | Current Direction: ", currentDirection, " | Hedge: ", inHedgeMode ? "YES" : "NO");
         lastHeartbeat = currentTime;
     }
 
@@ -225,25 +192,43 @@ void OnTimer()
     // 1. Read signal file
     string jsonContent = ReadSignalFile();
 
+    // Debug: Log file reading every 10 seconds
+    static datetime lastDebugLog = 0;
+    if (currentTime - lastDebugLog >= 10)
+    {
+        if (jsonContent == "")
+            Print("DEBUG: No signal file found or empty file");
+        else if (jsonContent == lastProcessedJson)
+            Print("DEBUG: Signal file unchanged (waiting for new signal)");
+        else
+            Print("DEBUG: New signal detected in file!");
+        lastDebugLog = currentTime;
+    }
 
     // 2. Check if signal changed
     bool isNewSignal = (jsonContent != "" && jsonContent != lastProcessedJson);
 
-    if (isNewSignal)
+    if (isNewSignal || (ForceResetOnNewSignal && jsonContent != ""))
     {
         Print("================================================================================");
         Print("=== NEW SIGNAL DETECTED ===");
+        Print("DEBUG: Raw JSON content: '", jsonContent, "'");
+        Print("DEBUG: Last processed: '", lastProcessedJson, "'");
+        Print("DEBUG: ForceResetOnNewSignal: ", ForceResetOnNewSignal ? "YES" : "NO");
 
         // 2.1. Extract and validate symbol
         string signalSymbol = ExtractSymbolFromJSON(jsonContent);
+        Print("DEBUG: Extracted symbol: '", signalSymbol, "' Configured: '", TradingSymbol, "'");
 
         if (!IsSignalForThisSymbol(signalSymbol))
         {
+            Print("DEBUG: Signal IGNORED - Symbol mismatch");
             lastProcessedJson = jsonContent;
             return;
         }
 
         string signalDirection = ExtractDirectionFromJSON(jsonContent);
+        Print("DEBUG: Extracted direction: '", signalDirection, "'");
 
         // CRITICAL: Show what direction was extracted
         if (signalDirection == "buy")
@@ -262,6 +247,70 @@ void OnTimer()
             Print("Positions: ", PositionsTotal());
             lastSignalTime = TimeCurrent();
 
+            // FORCE RESET MODE: Close everything and start fresh with new signal
+            if (ForceResetOnNewSignal && isNewSignal)
+            {
+                Print("=== FORCE RESET MODE ===");
+                Print("WARNING: ForceResetOnNewSignal is enabled!");
+
+                // CRITICAL: Check for losing positions BEFORE closing
+                int losingPositions = 0;
+                int totalPositions = 0;
+                double totalUnrealizedPL = 0;
+
+                for (int i = PositionsTotal() - 1; i >= 0; i--)
+                {
+                    if (positionInfo.SelectByIndex(i))
+                    {
+                        if (positionInfo.Symbol() == activeSymbol &&
+                            positionInfo.Magic() == MagicNumber)
+                        {
+                            totalPositions++;
+                            totalUnrealizedPL += positionInfo.Profit();
+                            if (positionInfo.Profit() < 0)
+                            {
+                                losingPositions++;
+                            }
+                        }
+                    }
+                }
+
+                // If there are losing positions, WARNING but still close (user explicitly enabled ForceReset)
+                if (losingPositions > 0)
+                {
+                    Print("================================================================================");
+                    Print("DANGER: ForceResetOnNewSignal will CLOSE ", losingPositions, " LOSING positions!");
+                    Print("Total P&L to be realized: $", totalUnrealizedPL);
+                    Print("This will LOCK IN LOSSES! Consider using hedge mode instead.");
+                    Print("To disable this behavior, set ForceResetOnNewSignal = false");
+                    Print("================================================================================");
+                    Sleep(5000);  // 5 second warning to allow user to intervene
+                }
+
+                Print("Closing all positions and starting fresh with signal: ", signalDirection);
+
+                // Close all positions first
+                if (PositionsTotal() > 0)
+                {
+                    CloseAllPositions();
+                    Sleep(1000);
+                }
+
+                // Reset all state
+                ResetGridState();
+
+                // Open first order in new signal direction
+                Print(">>> OPENING FIRST ORDER: ", signalDirection);
+                if (ExecuteGridOrder(signalDirection))
+                {
+                    currentDirection = signalDirection;
+                    lastProcessedJson = jsonContent;
+                    Print("Grid started with direction: ", currentDirection);
+                }
+                return;
+            }
+
+            // NORMAL MODE: Handle based on current state
             // 3. If no direction (first signal)
             if (currentDirection == "" && !inHedgeMode)
             {
@@ -271,7 +320,9 @@ void OnTimer()
                 {
                     currentDirection = signalDirection;
                     lastProcessedJson = jsonContent;
+                    lastSignalProcessedTime = TimeCurrent();  // Set cooldown timestamp
                     Print("Grid started. Direction: ", currentDirection);
+                    Print("Signal cooldown active for 60 seconds - trend reversal blocked");
                 }
             }
             // 4. Already have direction - check for reversal
@@ -282,7 +333,9 @@ void OnTimer()
                 // Check if signal is opposite direction
                 bool isOppositeSignal = (signalDirection != currentDirection);
 
-                if (isOppositeSignal)
+                Print("REVERSAL CHECK: Current=", currentDirection, " Signal=", signalDirection, " IsOpposite=", isOppositeSignal, " EnableAutoReverse=", EnableAutoReverse);
+
+                if (isOppositeSignal && EnableAutoReverse)
                 {
                     // Check for losing positions - if yes, use HEDGE mode
                     int losingPositions = 0;
@@ -297,34 +350,25 @@ void OnTimer()
                                 positionInfo.Magic() == MagicNumber)
                             {
                                 totalPositions++;
-                                double posProfit = positionInfo.Profit();
-                                totalUnrealizedPL += posProfit;
-                                if (posProfit < 0)
+                                totalUnrealizedPL += positionInfo.Profit();
+                                if (positionInfo.Profit() < 0)
                                 {
                                     losingPositions++;
                                 }
-                                Print("POSITION CHECK: Ticket=", positionInfo.Ticket(), " Profit=", posProfit);
                             }
                         }
                     }
 
-                    double myProfit = GetMyTotalProfit();
+                    double accountProfit = AccountInfoDouble(ACCOUNT_PROFIT);
 
-                    Print("=== SIGNAL REVERSAL CHECK ===");
-                    Print("Total Positions: ", totalPositions, " Losing: ", losingPositions);
-                    Print("Total Unrealized P&L: $", totalUnrealizedPL);
-                    Print("MY Profit (EA only): $", myProfit);
-                    Print("In Hedge Mode: ", inHedgeMode ? "YES" : "NO");
-
-                    // If has losing positions, ALWAYS enter HEDGE mode (never close losing positions)
-                    if (losingPositions > 0 && !inHedgeMode)
+                    // If has losing positions and hedge enabled, enter HEDGE mode
+                    if (losingPositions > 0 && EnableHedgeMode && !inHedgeMode)
                     {
                         Print("=== ENTERING HEDGE MODE (WEBHOOK) ===");
                         Print("Opposite signal received but has ", losingPositions, " losing positions");
                         Print("Old Direction: ", currentDirection, " | New Direction: ", signalDirection);
-                        Print("Current Profit: $", myProfit);
+                        Print("Current Profit: $", accountProfit);
                         Print("Opening NEW direction positions WITHOUT closing old ones");
-                        Print("HEDGE LOT MULTIPLIER: x", HedgeLotMultiplier);
 
                         // Set hedge state
                         hedgeOldDirection = currentDirection;
@@ -335,19 +379,13 @@ void OnTimer()
                         // Update current direction to NEW direction (for new orders)
                         currentDirection = signalDirection;
 
-                        // Open first order in NEW direction with MARTINGALE (multiplied lot) - IMMEDIATE
-                        if (ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier))
+                        // Open first order in NEW direction
+                        if (ExecuteGridOrder(currentDirection))
                         {
-                            Print("HEDGE MODE ACTIVATED (webhook) with x", HedgeLotMultiplier, " MARTINGALE");
+                            Print("HEDGE MODE ACTIVATED (webhook)");
                             Print("Old positions remain open. Adding positions in ", currentDirection);
                             Print("Will exit hedge when profit >= $", HedgeProfitTarget);
-                        }
-                        else
-                        {
-                            Print("FAILED to open hedge order - retrying immediately...");
-                            // Retry immediately on failure
-                            Sleep(100);
-                            ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier);
+                            lastSignalProcessedTime = TimeCurrent();  // Set cooldown
                         }
 
                         lastProcessedJson = jsonContent;
@@ -369,6 +407,7 @@ void OnTimer()
                                 currentDirection = signalDirection;
                                 targetReached = false;
                                 lastProcessedJson = jsonContent;
+                                lastSignalProcessedTime = TimeCurrent();  // Set cooldown
                                 Print("Reversal complete. New direction: ", currentDirection);
                             }
                         }
@@ -420,7 +459,7 @@ void OnTimer()
             return;
         }
 
-        double myProfit = GetMyTotalProfit();
+        double accountProfit = AccountInfoDouble(ACCOUNT_PROFIT);
 
         // 5.05 HEDGE MODE: Check if we should exit hedge mode with profit
         if (inHedgeMode)
@@ -428,23 +467,39 @@ void OnTimer()
             Print("=== HEDGE MODE ACTIVE ===");
             Print("Old Direction: ", hedgeOldDirection, " | New Direction: ", currentDirection);
             Print("Old Level: ", currentGridLevel, " | New Level: ", hedgeNewLevel);
-            Print("MY Profit (EA only): $", myProfit);
+            Print("Total Profit: $", accountProfit);
 
             bool shouldExitHedge = false;
             string exitReason = "";
 
             // Exit hedge if profit target reached
-            if (myProfit >= HedgeProfitTarget)
+            if (accountProfit >= HedgeProfitTarget)
             {
                 shouldExitHedge = true;
                 exitReason = "Hedge profit target reached";
+            }
+            // Exit hedge if breakeven and enabled
+            else if (CloseHedgeOnBreakeven && accountProfit >= 0)
+            {
+                shouldExitHedge = true;
+                exitReason = "Hedge breakeven reached";
+            }
+            // Exit hedge if max duration exceeded
+            else if (MaxHedgeDurationMinutes > 0)
+            {
+                int minutesInHedge = (int)((TimeCurrent() - hedgeStartTime) / 60);
+                if (minutesInHedge >= MaxHedgeDurationMinutes)
+                {
+                    shouldExitHedge = true;
+                    exitReason = "Max hedge duration exceeded (" + IntegerToString(minutesInHedge) + " minutes)";
+                }
             }
 
             if (shouldExitHedge)
             {
                 Print("=== EXITING HEDGE MODE ===");
                 Print("Reason: ", exitReason);
-                Print("Closing ALL positions with profit: $", myProfit);
+                Print("Closing ALL positions with profit: $", accountProfit);
 
                 if (CloseAllPositions())
                 {
@@ -458,10 +513,10 @@ void OnTimer()
         }
 
         // 5.1 Check if target reached (skip main target if in hedge mode)
-        if (!inHedgeMode && myProfit >= ProfitTargetMoney)
+        if (!inHedgeMode && accountProfit >= ProfitTargetMoney)
         {
             Print("=== TARGET REACHED ===");
-            Print("Profit: $", myProfit, " Target: $", ProfitTargetMoney);
+            Print("Profit: $", accountProfit, " Target: $", ProfitTargetMoney);
 
             if (CloseAllOnTarget)
             {
@@ -477,20 +532,9 @@ void OnTimer()
         if (ShouldAddGridOrder())
         {
             Print("=== ADDING GRID ORDER ===");
-            Print("Current Level: ", currentGridLevel, " Direction: ", currentDirection, " Hedge Mode: ", inHedgeMode ? "YES" : "NO");
+            Print("Current Level: ", currentGridLevel, " Direction: ", currentDirection);
 
-            // Execute grid order with MARTINGALE when in hedge mode
-            bool orderResult;
-            if (inHedgeMode)
-            {
-                orderResult = ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier);
-            }
-            else
-            {
-                orderResult = ExecuteGridOrder(currentDirection);
-            }
-
-            if (orderResult)
+            if (ExecuteGridOrder(currentDirection))
             {
                 Print("Grid order added. New level: ", currentGridLevel);
             }
@@ -499,10 +543,132 @@ void OnTimer()
         // 5.3 Check stop loss for individual positions
         CheckStopLoss();
 
-        // 5.4 Manage trailing stop for profitable positions (DISABLED in hedge mode)
-        if (!inHedgeMode)
+        // 5.4 Manage trailing stop for profitable positions
+        ManageTrailingStop();
+
+        // 5.5 Check for trend-based reversal (automatic, no signal needed)
+        if (!inHedgeMode && EnableAutoReverse && EnableTrendDetection && currentDirection != "")
         {
-            ManageTrailingStop();
+            // DEBUG: Show trend check is happening
+            static datetime lastTrendDebug = 0;
+            if (TimeCurrent() - lastTrendDebug >= 5)
+            {
+                Print("=== TREND CHECK === Current: ", currentDirection, " EnableTrendDetection: ", EnableTrendDetection);
+                lastTrendDebug = TimeCurrent();
+            }
+
+            // CRITICAL: Check if we're in cooldown period after a signal
+            // Don't reverse by trend for 60 seconds after processing a signal
+            int secondsSinceSignal = (int)(TimeCurrent() - lastSignalProcessedTime);
+            if (secondsSinceSignal < 60 && lastSignalProcessedTime > 0)
+            {
+                static datetime lastCooldownLog = 0;
+                if (TimeCurrent() - lastCooldownLog >= 10)  // Log every 10 seconds
+                {
+                    Print("TREND REVERSAL BLOCKED: Signal cooldown active (", secondsSinceSignal, "/60s)");
+                    lastCooldownLog = TimeCurrent();
+                }
+            }
+            else
+            {
+                string oppositeDirection = (currentDirection == "buy") ? "sell" : "buy";
+                double accountProfit = AccountInfoDouble(ACCOUNT_PROFIT);
+
+                // Check if trend is confirmed (opposite direction)
+                bool trendConfirmed = IsTrendConfirmedByCandles(oppositeDirection, TrendCheckCandles);
+
+                Print("TREND CHECK: Opposite=", oppositeDirection, " Confirmed=", trendConfirmed,
+                      " Profit=$", accountProfit, " MinProfit=$", MinProfitToReverse);
+
+            if (trendConfirmed)
+            {
+                // Check profit requirement
+                bool hasEnoughProfit = (accountProfit >= MinProfitToReverse);
+                bool canReverseRegardless = ReverseOnTrendRegardlessProfit;
+
+                Print("PROFIT CHECK: hasEnoughProfit=", hasEnoughProfit, " canReverseRegardless=", canReverseRegardless);
+
+                if (!hasEnoughProfit && !canReverseRegardless)
+                {
+                    Print("BLOCK: Trend confirmed but NOT ENOUGH PROFIT (need $", MinProfitToReverse, ", have $", accountProfit, ")");
+                }
+                else
+                {
+                    // Check for losing positions - decide between HEDGE and REVERSE
+                    int losingPositions = 0;
+                    int totalPositions = 0;
+                    double totalUnrealizedPL = 0;
+
+                    for (int i = PositionsTotal() - 1; i >= 0; i--)
+                    {
+                        if (positionInfo.SelectByIndex(i))
+                        {
+                            if (positionInfo.Symbol() == activeSymbol &&
+                                positionInfo.Magic() == MagicNumber)
+                            {
+                                totalPositions++;
+                                totalUnrealizedPL += positionInfo.Profit();
+                                if (positionInfo.Profit() < 0)
+                                {
+                                    losingPositions++;
+                                }
+                            }
+                        }
+                    }
+
+                    // If has losing positions and hedge enabled, enter HEDGE mode
+                    if (losingPositions > 0 && EnableHedgeMode && !inHedgeMode)
+                    {
+                        // ENTER HEDGE MODE - Don't close old positions, just add new direction
+                        Print("=== ENTERING HEDGE MODE (TREND) ===");
+                        Print("Trend changed but has ", losingPositions, " losing positions");
+                        Print("Old Direction: ", currentDirection, " | New Direction: ", oppositeDirection);
+                        Print("Current Profit: $", accountProfit);
+                        Print("Opening NEW direction positions WITHOUT closing old ones");
+
+                        // Set hedge state
+                        hedgeOldDirection = currentDirection;
+                        hedgeStartTime = TimeCurrent();
+                        hedgeNewLevel = 0;
+                        inHedgeMode = true;
+
+                        // Update current direction to NEW direction (for new orders)
+                        currentDirection = oppositeDirection;
+
+                        // Open first order in NEW direction
+                        if (ExecuteGridOrder(currentDirection))
+                        {
+                            Print("HEDGE MODE ACTIVATED (trend-based)");
+                            Print("Old positions remain open. Adding positions in ", currentDirection);
+                            Print("Will exit hedge when profit >= $", HedgeProfitTarget);
+                        }
+                    }
+                    else if (losingPositions == 0)
+                    {
+                        // All positions profitable - close all and reverse
+                        Print("=== AUTOMATIC REVERSAL (TREND-BASED) ===");
+                        Print("All ", totalPositions, " positions profitable");
+                        Print("Closing all positions and reversing to ", oppositeDirection);
+
+                        if (CloseAllPositions())
+                        {
+                            Sleep(1000);
+
+                            if (ExecuteGridOrder(oppositeDirection))
+                            {
+                                currentDirection = oppositeDirection;
+                                targetReached = false;
+                                Print("Trend-based reversal complete. New direction: ", currentDirection);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Print("TREND REVERSAL BLOCKED: Has ", losingPositions, " losing positions");
+                        Print("EnableHedgeMode is OFF - set to true to allow hedge");
+                    }
+                }
+            }  // Close else block (after cooldown check)
         }
     }
 }
@@ -520,7 +686,7 @@ string ReadSignalFile()
         static datetime lastFileErrorLog = 0;
         if (TimeCurrent() - lastFileErrorLog >= 30)
         {
-            Print("Cannot open signal file: ", SignalFilePath);
+            Print("DEBUG: Cannot open signal file: ", SignalFilePath);
             lastFileErrorLog = TimeCurrent();
         }
         return "";
@@ -532,6 +698,8 @@ string ReadSignalFile()
     {
         content += FileReadString(fileHandle);
     }
+
+    Print("DEBUG: File ", SignalFilePath, " read, content length: ", StringLen(content), " chars");
 
     FileClose(fileHandle);
     return content;
@@ -584,20 +752,6 @@ string ExtractSymbolFromJSON(string json)
 }
 
 //+------------------------------------------------------------------+
-//| Normalize symbol by removing trailing 'c' suffix                    |
-//+------------------------------------------------------------------+
-string NormalizeSymbol(string sym)
-{
-    string result = sym;
-    // Remove trailing 'c' if present (XAUUSDc -> XAUUSD)
-    if (StringLen(result) > 0 && StringGetCharacter(result, StringLen(result) - 1) == 'c')
-    {
-        result = StringSubstr(result, 0, StringLen(result) - 1);
-    }
-    return result;
-}
-
-//+------------------------------------------------------------------+
 //| Check if signal is for this EA's symbol                               |
 //+------------------------------------------------------------------+
 bool IsSignalForThisSymbol(string signalSymbol)
@@ -605,6 +759,18 @@ bool IsSignalForThisSymbol(string signalSymbol)
     // If signal has no symbol field, accept it (backward compatibility)
     if (signalSymbol == "")
         return true;
+
+    // Helper function to remove 'c' suffix for symbol comparison
+    string NormalizeSymbol(string sym)
+    {
+        string result = sym;
+        // Remove trailing 'c' if present (XAUUSDc -> XAUUSD)
+        if (StringLen(result) > 0 && StringGetCharacter(result, StringLen(result) - 1) == 'c')
+        {
+            result = StringSubstr(result, 0, StringLen(result) - 1);
+        }
+        return result;
+    }
 
     string normalizedSignal = NormalizeSymbol(signalSymbol);
     string normalizedTrading = NormalizeSymbol(TradingSymbol);
@@ -629,31 +795,40 @@ string ExtractDirectionFromJSON(string jsonContent)
 
     // Try to find "action" field first (legacy format)
     int actionPos = StringFind(jsonContent, "\"action\"");
+    Print("DEBUG: actionPos = ", actionPos);
 
     if (actionPos >= 0)
     {
         int colonPos = StringFind(jsonContent, ":", actionPos);
+        Print("DEBUG: colonPos = ", colonPos);
 
         if (colonPos > 0)
         {
             // Find the opening quote after the colon (skip whitespace)
             int quoteStart = StringFind(jsonContent, "\"", colonPos);
+            Print("DEBUG: quoteStart = ", quoteStart);
 
             if (quoteStart > 0)
             {
                 // Find the closing quote
                 int quoteEnd = StringFind(jsonContent, "\"", quoteStart + 1);
+                Print("DEBUG: quoteEnd = ", quoteEnd);
 
                 if (quoteEnd > 0)
                 {
                     string actionValue = StringSubstr(jsonContent, quoteStart + 1, quoteEnd - quoteStart - 1);
-                    StringToLower(actionValue);
+                    Print("DEBUG: actionValue raw = '", actionValue, "'");
+
+                    actionValue = StringToLower(actionValue);
+                    Print("DEBUG: actionValue lower = '", actionValue, "'");
 
                     // Convert to buy/sell
                     if (actionValue == "long" || actionValue == "buy")
                         direction = "buy";
                     else if (actionValue == "short" || actionValue == "sell")
                         direction = "sell";
+
+                    Print("DEBUG: Final direction = '", direction, "'");
                 }
             }
         }
@@ -681,18 +856,120 @@ bool ShouldAddGridOrder()
         return false;
     }
 
-    // Check drawdown limit (using THIS EA's profit only, not total account)
-    double myProfit = GetMyTotalProfit();
+    // Check drawdown limit
+    double accountProfit = AccountInfoDouble(ACCOUNT_PROFIT);
     double equity = AccountInfoDouble(ACCOUNT_EQUITY);
     double maxLoss = equity * (MaxDrawdownPercent / 100.0);
 
-    if (myProfit < -maxLoss)
+    if (accountProfit < -maxLoss)
     {
-        Print("Drawdown limit reached: $", myProfit, " Max loss: $", -maxLoss);
+        Print("Drawdown limit reached: $", accountProfit, " Max loss: $", -maxLoss);
+        return false;
+    }
+
+    // Check if candles are going AGAINST current position (trend reversal)
+    // Skip this check in hedge mode - we already know candles are against old direction
+    if (!inHedgeMode && EnableTrendDetection && AreCandlesAgainstPosition(AgainstTrendThreshold))
+    {
+        Print("=== TREND REVERSAL DETECTED ===");
+        Print("Candles are going against ", currentDirection, " position");
+        Print("Stopping grid addition - waiting for reversal signal");
         return false;
     }
 
     return true;
+}
+
+//+------------------------------------------------------------------+
+//| Count bullish candles in last N candles                             |
+//+------------------------------------------------------------------+
+int CountBullishCandles(int count, ENUM_TIMEFRAMES timeframe = PERIOD_M1)
+{
+    int bullish = 0;
+    for (int i = 0; i < count; i++)
+    {
+        int shift = i + 1;  // 1 = most recent completed candle
+        double open = iOpen(activeSymbol, timeframe, shift);
+        double close = iClose(activeSymbol, timeframe, shift);
+        if (close > open)
+            bullish++;
+    }
+    static datetime lastCandleLog = 0;
+    if (TimeCurrent() - lastCandleLog >= 5)
+    {
+        Print("CANDLES: ", bullish, " bullish out of ", count, " (", timeframe, ")");
+        lastCandleLog = TimeCurrent();
+    }
+    return bullish;
+}
+
+//+------------------------------------------------------------------+
+//| Count bearish candles in last N candles                             |
+//+------------------------------------------------------------------+
+int CountBearishCandles(int count, ENUM_TIMEFRAMES timeframe = PERIOD_M1)
+{
+    int bearish = 0;
+    for (int i = 0; i < count; i++)
+    {
+        int shift = i + 1;
+        double open = iOpen(activeSymbol, timeframe, shift);
+        double close = iClose(activeSymbol, timeframe, shift);
+        if (close < open)
+            bearish++;
+    }
+    return bearish;
+}
+
+//+------------------------------------------------------------------+
+//| Check if all N candles are in the given direction                  |
+//+------------------------------------------------------------------+
+bool AreAllCandlesInDirection(string direction, int count, ENUM_TIMEFRAMES timeframe = PERIOD_M1)
+{
+    for (int i = 0; i < count; i++)
+    {
+        int shift = i + 1;
+        double open = iOpen(activeSymbol, timeframe, shift);
+        double close = iClose(activeSymbol, timeframe, shift);
+
+        bool isBullish = (close > open);
+
+        if (direction == "buy" && !isBullish)
+            return false;  // Need bullish but got bearish
+        if (direction == "sell" && isBullish)
+            return false;  // Need bearish but got bullish
+    }
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check if trend is confirmed by candles                              |
+//+------------------------------------------------------------------+
+bool IsTrendConfirmedByCandles(string direction, int count)
+{
+    if (RequireConsecutiveCandles)
+    {
+        return AreAllCandlesInDirection(direction, count, PERIOD_CURRENT);
+    }
+    else
+    {
+        // Majority mode: more than 50% must be in direction
+        int required = (count / 2) + 1;
+        int matching = (direction == "buy") ? CountBullishCandles(count, PERIOD_CURRENT)
+                                               : CountBearishCandles(count, PERIOD_CURRENT);
+        return (matching >= required);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if candles are going AGAINST current position                |
+//+------------------------------------------------------------------+
+bool AreCandlesAgainstPosition(int count)
+{
+    if (currentDirection == "")
+        return false;
+
+    string oppositeDirection = (currentDirection == "buy") ? "sell" : "buy";
+    return IsTrendConfirmedByCandles(oppositeDirection, count);
 }
 
 //+------------------------------------------------------------------+
@@ -709,8 +986,60 @@ bool ShouldReverseDirection(string newSignalDirection)
         return false;
     }
 
-    // If we reach here, all positions are profitable (hedge mode check is done before calling this function)
+    // Check if auto reverse is enabled
+    if (!EnableAutoReverse)
+    {
+        Print("BLOCK: AutoReverse disabled");
+        return false;
+    }
+
+    double accountProfit = AccountInfoDouble(ACCOUNT_PROFIT);
+    Print("CHECK: Account Profit=$", accountProfit, " MinProfitToReverse=$", MinProfitToReverse);
+
+    // Must have minimum profit (account TOTAL profit, not per position)
+    if (accountProfit < MinProfitToReverse)
+    {
+        Print("BLOCK: Account Profit $", accountProfit, " < MinProfitToReverse $", MinProfitToReverse);
+        return false;
+    }
+
+    // CRITICAL: Check if ALL positions are profitable before closing
+    // If ANY position is negative, DO NOT CLOSE - use hedge instead
+    int losingPositions = 0;
+    int totalPositions = 0;
+    double totalUnrealizedPL = 0;
+
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if (positionInfo.SelectByIndex(i))
+        {
+            if (positionInfo.Symbol() == activeSymbol &&
+                positionInfo.Magic() == MagicNumber)
+            {
+                totalPositions++;
+                double profit = positionInfo.Profit();
+                totalUnrealizedPL += profit;
+                if (profit < 0)
+                {
+                    losingPositions++;
+                }
+            }
+        }
+    }
+
+    Print("POSITIONS CHECK: Total=", totalPositions, " Losing=", losingPositions, " P&L=$", totalUnrealizedPL);
+
+    // If ANY position is losing, DON'T CLOSE - use hedge mode instead
+    if (losingPositions > 0)
+    {
+        Print("BLOCK: Has ", losingPositions, " losing positions - Use HEDGE MODE");
+        Print("Total P&L: $", totalUnrealizedPL, " - Will use HEDGE MODE instead of closing");
+        return false;  // Force hedge mode to be used
+    }
+
     Print("=== REVERSAL TRIGGERED ===");
+    Print("- All ", totalPositions, " positions are profitable");
+    Print("- Account Profit: $", accountProfit, " >= MinProfit: $", MinProfitToReverse);
     Print("- New signal direction: ", newSignalDirection, " (opposite of ", currentDirection, ")");
     Print("- Will close ALL positions and reverse direction");
 
@@ -748,8 +1077,11 @@ bool AreCurrentPositionsProfitable()
 //+------------------------------------------------------------------+
 bool ExecuteGridOrder(string direction)
 {
+    Print("DEBUG ExecuteGridOrder: direction=", direction, " level=", currentGridLevel);
+
     // Normalize direction to lowercase
-    StringToLower(direction);
+    direction = StringToLower(direction);
+    Print("DEBUG: Normalized direction: ", direction);
 
     // CRITICAL: Validate direction before executing
     if (direction != "buy" && direction != "sell")
@@ -759,6 +1091,7 @@ bool ExecuteGridOrder(string direction)
     }
 
     double volume = CalculateVolume();
+    Print("DEBUG CalculateVolume result: ", volume);
 
     if (volume <= 0)
     {
@@ -784,6 +1117,8 @@ bool ExecuteGridOrder(string direction)
         return false;
     }
 
+    Print("DEBUG symbolInfo refreshed: Ask=", ask, " Bid=", bid);
+
     bool success = false;
 
     if (direction == "buy")
@@ -792,6 +1127,8 @@ bool ExecuteGridOrder(string direction)
 
         double sl = StopLossPoints > 0 ? NormalizeDouble(ask - StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
         double tp = TakeProfitPoints > 0 ? NormalizeDouble(ask + TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
+
+        Print("DEBUG: Attempting BUY - Ask=", ask, " SL=", sl, " TP=", tp, " Volume=", volume);
 
         if (trade.Buy(volume, activeSymbol, ask, sl, tp, "TVGrid"))
         {
@@ -812,124 +1149,7 @@ bool ExecuteGridOrder(string direction)
         double sl = StopLossPoints > 0 ? NormalizeDouble(bid + StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
         double tp = TakeProfitPoints > 0 ? NormalizeDouble(bid - TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
 
-        if (trade.Sell(volume, activeSymbol, bid, sl, tp, "TVGrid"))
-        {
-            Print("SELL ORDER OPENED: Volume=", volume, " Price=", bid, " SL=", sl, " TP=", tp);
-            success = true;
-        }
-        else
-        {
-            Print("SELL ORDER FAILED: ", trade.ResultRetcodeDescription());
-        }
-    }
-
-    if (success)
-    {
-        lastGridOrderTime = TimeCurrent();
-        currentGridLevel++;
-
-        // In hedge mode, also track new direction level separately
-        if (inHedgeMode)
-        {
-            hedgeNewLevel++;
-            Print("HEDGE: New level=", hedgeNewLevel, " Total level=", currentGridLevel);
-        }
-
-        totalOrdersOpened++;
-    }
-
-    return success;
-}
-
-//+------------------------------------------------------------------+
-//| Execute grid order with lot multiplier (for hedge)                |
-//+------------------------------------------------------------------+
-bool ExecuteGridOrderWithMultiplier(string direction, double lotMultiplier = 1.0)
-{
-    Print("=== ExecuteGridOrderWithMultiplier CALLED ===");
-    Print("Direction: ", direction, " | Multiplier: ", lotMultiplier);
-
-    // Normalize direction to lowercase
-    StringToLower(direction);
-
-    // CRITICAL: Validate direction before executing
-    if (direction != "buy" && direction != "sell")
-    {
-        Print("ERROR: Invalid direction '", direction, "' - must be 'buy' or 'sell'");
-        return false;
-    }
-
-    double volume = CalculateVolume(lotMultiplier);
-    Print("Calculated Volume: ", volume, " (FixedLotSize=", FixedLotSize, " Multiplier=", lotMultiplier, ")");
-
-    if (volume <= 0)
-    {
-        Print("ERROR: Invalid volume calculated: ", volume);
-        return false;
-    }
-
-    // Check if market is open for trading
-    long tradeMode = SymbolInfoInteger(activeSymbol, SYMBOL_TRADE_MODE);
-    if (tradeMode != SYMBOL_TRADE_MODE_FULL)
-    {
-        Print("ERROR: Market not open for trading. Trade mode: ", tradeMode);
-        return false;
-    }
-
-    // Verify volume is within broker limits BEFORE sending order
-    double minLot = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_MIN);
-    double maxLot = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_MAX);
-    if (volume < minLot || volume > maxLot)
-    {
-        Print("ERROR: Volume OUT OF BROKER LIMITS! Requested=", volume, " Min=", minLot, " Max=", maxLot);
-        return false;
-    }
-
-    // CRITICAL: Refresh symbol rates and verify they're valid
-    if (!symbolInfo.RefreshRates())
-    {
-        Print("ERROR: Failed to refresh symbol rates for ", activeSymbol);
-        return false;
-    }
-
-    double ask = symbolInfo.Ask();
-    double bid = symbolInfo.Bid();
-
-    // Verify prices are valid
-    if (ask <= 0 || bid <= 0)
-    {
-        Print("ERROR: Invalid prices - Ask=", ask, " Bid=", bid, " Symbol=", activeSymbol);
-        Print("ERROR: symbolInfo may not be properly initialized!");
-        return false;
-    }
-
-    bool success = false;
-
-    if (direction == "buy")
-    {
-        Print(">>> EXECUTING BUY ORDER (HEDGE x", lotMultiplier, ") Volume=", volume, " <<<");
-
-        double sl = StopLossPoints > 0 ? NormalizeDouble(ask - StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-        double tp = TakeProfitPoints > 0 ? NormalizeDouble(ask + TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-
-        if (trade.Buy(volume, activeSymbol, ask, sl, tp, "TVGrid"))
-        {
-            Print("BUY ORDER OPENED: Volume=", volume, " Price=", ask, " SL=", sl, " TP=", tp);
-            success = true;
-        }
-        else
-        {
-            uint error = trade.ResultRetcode();
-            Print("BUY ORDER FAILED. Error code: ", error, " Description: ", trade.ResultRetcodeDescription());
-        }
-    }
-    else if (direction == "sell")
-    {
-        Print(">>> EXECUTING SELL ORDER (HEDGE x", lotMultiplier, ") Volume=", volume, " <<<");
-
-        double bid = symbolInfo.Bid();
-        double sl = StopLossPoints > 0 ? NormalizeDouble(bid + StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-        double tp = TakeProfitPoints > 0 ? NormalizeDouble(bid - TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
+        Print("DEBUG: Attempting SELL - Bid=", bid, " SL=", sl, " TP=", tp, " Volume=", volume);
 
         if (trade.Sell(volume, activeSymbol, bid, sl, tp, "TVGrid"))
         {
@@ -963,13 +1183,14 @@ bool ExecuteGridOrderWithMultiplier(string direction, double lotMultiplier = 1.0
 //+------------------------------------------------------------------+
 //| Calculate volume for trade                                          |
 //+------------------------------------------------------------------+
-double CalculateVolume(double multiplier = 1.0)
+double CalculateVolume()
 {
     double volume;
 
     if (UseFixedLots)
     {
         volume = FixedLotSize;
+        Print("CALCVOLUME: Using fixed lots = ", volume);
     }
     else
     {
@@ -979,21 +1200,19 @@ double CalculateVolume(double multiplier = 1.0)
         double tickValue = SymbolInfoDouble(activeSymbol, SYMBOL_TRADE_TICK_VALUE);
         double slValue = StopLossPoints * tickValue;
 
+        Print("CALCVOLUME: Equity=$", equity, " Risk=", RiskPercent, "% RiskAmount=$", riskAmount);
+        Print("CALCVOLUME: TickValue=", tickValue, " StopLossPoints=", StopLossPoints, " slValue=", slValue);
+
         if (slValue > 0 && tickValue > 0)
         {
             volume = riskAmount / slValue;
+            Print("CALCVOLUME: Calculated volume = ", volume);
         }
         else
         {
             volume = 0.01; // Default
+            Print("CALCVOLUME: Using default volume (slValue or tickValue invalid)");
         }
-    }
-
-    // Apply multiplier (for hedge orders)
-    if (multiplier != 1.0)
-    {
-        volume = volume * multiplier;
-        Print("LOT MULTIPLIER: Volume multiplied by ", multiplier, " = ", volume);
     }
 
     // Validate lot size
@@ -1003,12 +1222,8 @@ double CalculateVolume(double multiplier = 1.0)
         double maxLot = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_MAX);
         double lotStep = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_STEP);
 
-        Print("LOT VALIDATION: Before=", volume, " Min=", minLot, " Max=", maxLot, " Step=", lotStep);
-
         volume = MathFloor(volume / lotStep) * lotStep;
         volume = MathMax(minLot, MathMin(maxLot, volume));
-
-        Print("LOT VALIDATION: After=", volume);
     }
 
     // CRITICAL: Check for NaN or invalid volume
@@ -1018,31 +1233,8 @@ double CalculateVolume(double multiplier = 1.0)
         volume = 0.01;
     }
 
-    Print("FINAL VOLUME: ", volume);
-
+    Print("CALCVOLUME: Final volume = ", volume);
     return volume;
-}
-
-//+------------------------------------------------------------------+
-//| Get total profit from THIS EA's positions only (filtered by MagicNumber) |
-//+------------------------------------------------------------------+
-double GetMyTotalProfit()
-{
-    double totalProfit = 0.0;
-
-    for (int i = PositionsTotal() - 1; i >= 0; i--)
-    {
-        if (positionInfo.SelectByIndex(i))
-        {
-            if (positionInfo.Symbol() == activeSymbol &&
-                positionInfo.Magic() == MagicNumber)
-            {
-                totalProfit += positionInfo.Profit();
-            }
-        }
-    }
-
-    return totalProfit;
 }
 
 //+------------------------------------------------------------------+
@@ -1187,6 +1379,7 @@ void ResetGridState()
     currentGridLevel = 0;
     targetReached = false;
     lastProcessedJson = "";
+    lastSignalProcessedTime = 0;  // Reset signal cooldown timer
 
     // Reset hedge state
     inHedgeMode = false;
