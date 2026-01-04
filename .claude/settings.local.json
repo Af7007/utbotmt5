@@ -7,7 +7,9 @@
       "mcp__context7__get-library-docs",
       "Bash(openspec validate:*)",
       "Bash(python:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(openspec show:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }

@@ -25,19 +25,15 @@ input int      StopLossPoints = 1000;           // SL in points (e.g., 500 = $5 
 //--- Grid Settings
 input int      PollingIntervalSec = 0;        // Signal polling frequency (seconds) - 0 = FASTEST
 input string   SignalFilePath = "signal_XAUUSD.json"; // Signal file path (works for both XAUUSD and XAUUSDc)
-input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds) - FASTER FOR HEDGE
-input double   ProfitTargetMoney = 20.0;      // Total profit target ($) - REDUCED FOR SAFETY
-input int      MaxGridOrders = 10;             // Maximum orders per direction - REDUCED FOR SAFETY
+input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds)
+input double   ProfitTargetMoney = 20.0;      // Total profit target ($)
+input int      MaxGridOrders = 10;             // Maximum orders per direction
 input bool     CloseAllOnTarget = true;        // Close all when target reached
 
 //--- Hedge Strategy (NEVER closes in loss, always waits for profit)
 input bool     EnableHedgeMode = true;         // Enable hedge mode (opens new direction without closing old)
-input double   HedgeProfitTarget = 50.0;       // Close ALL when total profit reaches this amount ($) - INCREASED FOR MORE MARTINGALE
-input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions - DEFAULT 1.5x (SAFER)
-
-//--- Continuous Martingale (True Martingale Progression)
-input bool     EnableContinuousMartingale = false;  // Enable true martingale (each order multiplies LAST order's lot)
-input double   MartingaleMultiplier = 1.5;          // Multiplier for each subsequent order (1.5 = 50% increase)
+input double   HedgeProfitTarget = 50.0;       // Close ALL when total profit reaches this amount ($)
+input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions
 
 //--- Protection
 input double   MaxDrawdownPercent = 5.0;      // Maximum drawdown (% of equity) - REDUCED FOR SAFETY
@@ -68,12 +64,6 @@ bool inHedgeMode = false;              // If currently in hedge mode (both direc
 string hedgeOldDirection = "";         // The old direction before hedge
 datetime hedgeStartTime = 0;           // When hedge mode started
 int hedgeNewLevel = 0;                 // Grid level in NEW direction (hedge orders)
-
-//--- Continuous Martingale State
-double lastBuyLotSize = 0.0;           // Last lot size opened for BUY orders
-double lastSellLotSize = 0.0;          // Last lot size opened for SELL orders
-int buyMartingaleLevel = 0;            // Martingale level for BUY direction
-int sellMartingaleLevel = 0;           // Martingale level for SELL direction
 
 //--- Signal Control
 string lastProcessedJson = "";         // Last processed JSON
@@ -118,10 +108,10 @@ int OnInit()
     Print("Grid Interval: ", GridIntervalSeconds, " seconds");
     Print("Profit Target: $", ProfitTargetMoney);
     Print("Max Grid Orders: ", MaxGridOrders);
-    Print("Hedge Lot Multiplier: x", HedgeLotMultiplier);
-    Print("Continuous Martingale: ", EnableContinuousMartingale ? "ENABLED" : "DISABLED");
-    if (EnableContinuousMartingale)
-        Print("Martingale Multiplier: x", MartingaleMultiplier, " (true progression)");
+    Print("Use Fixed Lots: ", UseFixedLots ? "YES" : "NO", " (", UseFixedLots ? FixedLotSize : DoubleToString(RiskPercent, 1) + "%", ")");
+    Print("Hedge Mode: ", EnableHedgeMode ? "ENABLED" : "DISABLED");
+    if (EnableHedgeMode)
+        Print("Hedge Lot Multiplier: x", HedgeLotMultiplier, " | Hedge Profit Target: $", HedgeProfitTarget);
 
     // Verify symbol info is valid
     if (!symbolInfo.RefreshRates())
@@ -230,12 +220,6 @@ void OnTimer()
         string hb = "=== HEARTBEAT === EA running | Dir: " + currentDirection +
                     " | Hedge: " + (inHedgeMode ? "YES" : "NO") +
                     " | Daily P&L: $" + DoubleToString(dailyPnL, 2);
-        if (EnableContinuousMartingale && currentDirection != "")
-        {
-            int level = GetMartingaleLevel(currentDirection);
-            double lastLot = GetLastLotSize(currentDirection);
-            hb += " | Martingale Lvl: " + IntegerToString(level) + " | Last Lot: " + DoubleToString(lastLot, 3);
-        }
         Print(hb);
         lastHeartbeat = currentTime;
     }
@@ -298,7 +282,7 @@ void OnTimer()
                     Print("Grid started. Direction: ", currentDirection);
                 }
             }
-            // 4. Already have direction - check for reversal
+            // 4. Already have direction - check for reversal or hedge
             else
             {
                 Print("Already trading. Current: ", currentDirection, " Signal: ", signalDirection);
@@ -340,8 +324,8 @@ void OnTimer()
                     Print("MY Profit (EA only): $", myProfit);
                     Print("In Hedge Mode: ", inHedgeMode ? "YES" : "NO");
 
-                    // If has losing positions, ALWAYS enter HEDGE mode (never close losing positions)
-                    if (losingPositions > 0 && !inHedgeMode)
+                    // If has losing positions AND hedge enabled, enter HEDGE mode
+                    if (losingPositions > 0 && !inHedgeMode && EnableHedgeMode)
                     {
                         Print("=== ENTERING HEDGE MODE (WEBHOOK) ===");
                         Print("Opposite signal received but has ", losingPositions, " losing positions");
@@ -359,15 +343,8 @@ void OnTimer()
                         // Update current direction to NEW direction (for new orders)
                         currentDirection = signalDirection;
 
-                        // Reset martingale for NEW direction (start fresh)
-                        ResetMartingaleLevel(currentDirection);
-                        if (currentDirection == "buy")
-                            lastBuyLotSize = 0.0;
-                        else
-                            lastSellLotSize = 0.0;
-
                         // Open first order in NEW direction with MARTINGALE (multiplied lot) - IMMEDIATE
-                        if (ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier))
+                        if (ExecuteGridOrder(signalDirection))
                         {
                             Print("HEDGE MODE ACTIVATED (webhook) with x", HedgeLotMultiplier, " MARTINGALE");
                             Print("Old positions remain open. Adding positions in ", currentDirection);
@@ -376,9 +353,8 @@ void OnTimer()
                         else
                         {
                             Print("FAILED to open hedge order - retrying immediately...");
-                            // Retry immediately on failure
                             Sleep(100);
-                            ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier);
+                            ExecuteGridOrder(signalDirection);
                         }
 
                         lastProcessedJson = jsonContent;
@@ -412,7 +388,7 @@ void OnTimer()
                 }
                 else
                 {
-                    Print("Signal ignored - same direction or auto-reverse disabled");
+                    Print("Signal ignored - same direction");
                     lastProcessedJson = jsonContent;
                 }
             }
@@ -508,20 +484,9 @@ void OnTimer()
         if (ShouldAddGridOrder())
         {
             Print("=== ADDING GRID ORDER ===");
-            Print("Current Level: ", currentGridLevel, " Direction: ", currentDirection, " Hedge Mode: ", inHedgeMode ? "YES" : "NO");
+            Print("Current Level: ", currentGridLevel, " Direction: ", currentDirection);
 
-            // Execute grid order with MARTINGALE when in hedge mode
-            bool orderResult;
-            if (inHedgeMode)
-            {
-                orderResult = ExecuteGridOrderWithMultiplier(currentDirection, HedgeLotMultiplier);
-            }
-            else
-            {
-                orderResult = ExecuteGridOrder(currentDirection);
-            }
-
-            if (orderResult)
+            if (ExecuteGridOrder(currentDirection))
             {
                 Print("Grid order added. New level: ", currentGridLevel);
             }
@@ -740,7 +705,7 @@ bool ShouldReverseDirection(string newSignalDirection)
         return false;
     }
 
-    // If we reach here, all positions are profitable (hedge mode check is done before calling this function)
+    // Reversal confirmed - close all positions and reverse
     Print("=== REVERSAL TRIGGERED ===");
     Print("- New signal direction: ", newSignalDirection, " (opposite of ", currentDirection, ")");
     Print("- Will close ALL positions and reverse direction");
@@ -789,7 +754,7 @@ bool ExecuteGridOrder(string direction)
         return false;
     }
 
-    double volume = CalculateVolume(1.0, direction);
+    double volume = CalculateVolume(direction);
 
     if (volume <= 0)
     {
@@ -819,7 +784,10 @@ bool ExecuteGridOrder(string direction)
 
     if (direction == "buy")
     {
-        Print(">>> EXECUTING BUY ORDER <<<");
+        if (inHedgeMode)
+            Print(">>> EXECUTING BUY ORDER (HEDGE MODE) Volume=", volume, " <<<");
+        else
+            Print(">>> EXECUTING BUY ORDER Volume=", volume, " <<<");
 
         double sl = StopLossPoints > 0 ? NormalizeDouble(ask - StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
         double tp = TakeProfitPoints > 0 ? NormalizeDouble(ask + TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
@@ -837,7 +805,10 @@ bool ExecuteGridOrder(string direction)
     }
     else if (direction == "sell")
     {
-        Print(">>> EXECUTING SELL ORDER <<<");
+        if (inHedgeMode)
+            Print(">>> EXECUTING SELL ORDER (HEDGE MODE) Volume=", volume, " <<<");
+        else
+            Print(">>> EXECUTING SELL ORDER Volume=", volume, " <<<");
 
         double bid = symbolInfo.Bid();
         double sl = StopLossPoints > 0 ? NormalizeDouble(bid + StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
@@ -866,236 +837,29 @@ bool ExecuteGridOrder(string direction)
             Print("HEDGE: New level=", hedgeNewLevel, " Total level=", currentGridLevel);
         }
 
-        // Update martingale tracking
-        if (EnableContinuousMartingale)
-        {
-            UpdateLastLotSize(direction, volume);
-            int level = GetMartingaleLevel(direction);
-            double multiplierFromBase = volume / FixedLotSize;
-            Print("MARTINGALE Level ", level, ": ", volume, " lot (", multiplierFromBase, "x base)");
-        }
-
         totalOrdersOpened++;
     }
 
     return success;
-}
-
-//+------------------------------------------------------------------+
-//| Execute grid order with lot multiplier (for hedge)                |
-//+------------------------------------------------------------------+
-bool ExecuteGridOrderWithMultiplier(string direction, double lotMultiplier = 1.0)
-{
-    Print("=== ExecuteGridOrderWithMultiplier CALLED ===");
-    Print("Direction: ", direction, " | Multiplier: ", lotMultiplier);
-
-    // Normalize direction to lowercase
-    StringToLower(direction);
-
-    // CRITICAL: Validate direction before executing
-    if (direction != "buy" && direction != "sell")
-    {
-        Print("ERROR: Invalid direction '", direction, "' - must be 'buy' or 'sell'");
-        return false;
-    }
-
-    double volume = CalculateVolume(lotMultiplier, direction);
-    Print("Calculated Volume: ", volume, " (FixedLotSize=", FixedLotSize, " Multiplier=", lotMultiplier, ")");
-
-    if (volume <= 0)
-    {
-        Print("ERROR: Invalid volume calculated: ", volume);
-        return false;
-    }
-
-    // Check if market is open for trading
-    long tradeMode = SymbolInfoInteger(activeSymbol, SYMBOL_TRADE_MODE);
-    if (tradeMode != SYMBOL_TRADE_MODE_FULL)
-    {
-        Print("ERROR: Market not open for trading. Trade mode: ", tradeMode);
-        return false;
-    }
-
-    // Verify volume is within broker limits BEFORE sending order
-    double minLot = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_MIN);
-    double maxLot = SymbolInfoDouble(activeSymbol, SYMBOL_VOLUME_MAX);
-    if (volume < minLot || volume > maxLot)
-    {
-        Print("ERROR: Volume OUT OF BROKER LIMITS! Requested=", volume, " Min=", minLot, " Max=", maxLot);
-        return false;
-    }
-
-    // CRITICAL: Refresh symbol rates and verify they're valid
-    if (!symbolInfo.RefreshRates())
-    {
-        Print("ERROR: Failed to refresh symbol rates for ", activeSymbol);
-        return false;
-    }
-
-    double ask = symbolInfo.Ask();
-    double bid = symbolInfo.Bid();
-
-    // Verify prices are valid
-    if (ask <= 0 || bid <= 0)
-    {
-        Print("ERROR: Invalid prices - Ask=", ask, " Bid=", bid, " Symbol=", activeSymbol);
-        Print("ERROR: symbolInfo may not be properly initialized!");
-        return false;
-    }
-
-    bool success = false;
-
-    if (direction == "buy")
-    {
-        Print(">>> EXECUTING BUY ORDER (HEDGE x", lotMultiplier, ") Volume=", volume, " <<<");
-
-        double sl = StopLossPoints > 0 ? NormalizeDouble(ask - StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-        double tp = TakeProfitPoints > 0 ? NormalizeDouble(ask + TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-
-        if (trade.Buy(volume, activeSymbol, ask, sl, tp, "TVGrid"))
-        {
-            Print("BUY ORDER OPENED: Volume=", volume, " Price=", ask, " SL=", sl, " TP=", tp);
-            success = true;
-        }
-        else
-        {
-            uint error = trade.ResultRetcode();
-            Print("BUY ORDER FAILED. Error code: ", error, " Description: ", trade.ResultRetcodeDescription());
-        }
-    }
-    else if (direction == "sell")
-    {
-        Print(">>> EXECUTING SELL ORDER (HEDGE x", lotMultiplier, ") Volume=", volume, " <<<");
-
-        double bid = symbolInfo.Bid();
-        double sl = StopLossPoints > 0 ? NormalizeDouble(bid + StopLossPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-        double tp = TakeProfitPoints > 0 ? NormalizeDouble(bid - TakeProfitPoints * symbolInfo.Point(), symbolInfo.Digits()) : 0;
-
-        if (trade.Sell(volume, activeSymbol, bid, sl, tp, "TVGrid"))
-        {
-            Print("SELL ORDER OPENED: Volume=", volume, " Price=", bid, " SL=", sl, " TP=", tp);
-            success = true;
-        }
-        else
-        {
-            Print("SELL ORDER FAILED: ", trade.ResultRetcodeDescription());
-        }
-    }
-
-    if (success)
-    {
-        lastGridOrderTime = TimeCurrent();
-        currentGridLevel++;
-
-        // In hedge mode, also track new direction level separately
-        if (inHedgeMode)
-        {
-            hedgeNewLevel++;
-            Print("HEDGE: New level=", hedgeNewLevel, " Total level=", currentGridLevel);
-        }
-
-        // Update martingale tracking
-        if (EnableContinuousMartingale)
-        {
-            UpdateLastLotSize(direction, volume);
-            int level = GetMartingaleLevel(direction);
-            double multiplierFromBase = volume / FixedLotSize;
-            Print("MARTINGALE Level ", level, ": ", volume, " lot (", multiplierFromBase, "x base)");
-        }
-
-        totalOrdersOpened++;
-    }
-
-    return success;
-}
-
-//+------------------------------------------------------------------+
-//| Get last lot size for direction (continuous martingale)            |
-//+------------------------------------------------------------------+
-double GetLastLotSize(string direction)
-{
-    StringToLower(direction);
-    if (direction == "buy")
-        return lastBuyLotSize;
-    else if (direction == "sell")
-        return lastSellLotSize;
-    return 0.0;
-}
-
-//+------------------------------------------------------------------+
-//| Update last lot size for direction (continuous martingale)         |
-//+------------------------------------------------------------------+
-void UpdateLastLotSize(string direction, double lot)
-{
-    StringToLower(direction);
-    if (direction == "buy")
-    {
-        lastBuyLotSize = lot;
-        buyMartingaleLevel++;
-    }
-    else if (direction == "sell")
-    {
-        lastSellLotSize = lot;
-        sellMartingaleLevel++;
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Get martingale level for direction                                 |
-//+------------------------------------------------------------------+
-int GetMartingaleLevel(string direction)
-{
-    StringToLower(direction);
-    if (direction == "buy")
-        return buyMartingaleLevel;
-    else if (direction == "sell")
-        return sellMartingaleLevel;
-    return 0;
-}
-
-//+------------------------------------------------------------------+
-//| Reset martingale level for direction                               |
-//+------------------------------------------------------------------+
-void ResetMartingaleLevel(string direction)
-{
-    StringToLower(direction);
-    if (direction == "buy")
-        buyMartingaleLevel = 0;
-    else if (direction == "sell")
-        sellMartingaleLevel = 0;
 }
 
 //+------------------------------------------------------------------+
 //| Calculate volume for trade                                          |
 //+------------------------------------------------------------------+
-double CalculateVolume(double multiplier = 1.0, string direction = "")
+double CalculateVolume(string direction = "")
 {
     double volume;
+    double baseVolume;  // Base volume before applying hedge multiplier
 
-    // Continuous Martingale Mode: multiply LAST order's lot, not base lot
-    if (EnableContinuousMartingale && direction != "")
+    // Calculate base volume (first order in direction)
+    if (UseFixedLots)
     {
-        double lastLot = GetLastLotSize(direction);
-
-        if (lastLot > 0)
-        {
-            // Multiply last lot by martingale multiplier
-            volume = lastLot * MartingaleMultiplier;
-            Print("CONTINUOUS MARTINGALE: Last lot=", lastLot, " x ", MartingaleMultiplier, " = ", volume);
-        }
-        else
-        {
-            // First order in this direction - use base lot
-            volume = FixedLotSize;
-            Print("CONTINUOUS MARTINGALE: First order (no previous lot), using base: ", volume);
-        }
-    }
-    else if (UseFixedLots)
-    {
-        volume = FixedLotSize;
+        baseVolume = FixedLotSize;
+        Print("FIXED LOT MODE: Using fixed lot size: ", baseVolume);
     }
     else
     {
+        // Percentage-based calculation
         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
         double riskAmount = equity * (RiskPercent / 100.0);
 
@@ -1104,19 +868,26 @@ double CalculateVolume(double multiplier = 1.0, string direction = "")
 
         if (slValue > 0 && tickValue > 0)
         {
-            volume = riskAmount / slValue;
+            baseVolume = riskAmount / slValue;
         }
         else
         {
-            volume = 0.01; // Default
+            baseVolume = 0.01; // Default
         }
+        Print("PERCENTAGE MODE: Risk=", RiskPercent, "% Equity=", equity, " Calculated: ", baseVolume);
     }
 
-    // Apply legacy multiplier (for hedge orders when NOT using continuous martingale)
-    if (!EnableContinuousMartingale && multiplier != 1.0)
+    // Apply Hedge Lot Multiplier if in hedge mode
+    // ALL hedge orders use multiplied lot, not just the first one
+    if (inHedgeMode)
     {
-        volume = volume * multiplier;
-        Print("LOT MULTIPLIER: Volume multiplied by ", multiplier, " = ", volume);
+        volume = baseVolume * HedgeLotMultiplier;
+        Print("HEDGE MODE: Base lot=", baseVolume, " x ", HedgeLotMultiplier, " = ", volume);
+    }
+    else
+    {
+        volume = baseVolume;
+        Print("NORMAL MODE: Using base volume: ", volume);
     }
 
     // Validate lot size
@@ -1323,11 +1094,5 @@ void ResetGridState()
     hedgeOldDirection = "";
     hedgeStartTime = 0;
     hedgeNewLevel = 0;
-
-    // Reset martingale state
-    lastBuyLotSize = 0.0;
-    lastSellLotSize = 0.0;
-    buyMartingaleLevel = 0;
-    sellMartingaleLevel = 0;
 }
 //+------------------------------------------------------------------+
