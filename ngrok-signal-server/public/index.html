@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradingView Signal Server</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #eee;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            padding: 40px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .status.online {
+            background: rgba(76, 175, 80, 0.2);
+            color: #4caf50;
+        }
+
+        .status.waiting {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+        }
+
+        .status.offline {
+            background: rgba(244, 67, 54, 0.2);
+            color: #f44336;
+        }
+
+        .signals-list {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .signal-card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .signal-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .signal-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .signal-direction {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+
+        .signal-direction.buy {
+            background: linear-gradient(135deg, #4caf50, #45a049);
+            color: white;
+        }
+
+        .signal-direction.sell {
+            background: linear-gradient(135deg, #f44336, #d32f2f);
+            color: white;
+        }
+
+        .signal-details h3 {
+            font-size: 1.1rem;
+            margin-bottom: 5px;
+        }
+
+        .signal-details p {
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+
+        .signal-time {
+            text-align: right;
+            font-size: 0.85rem;
+            opacity: 0.6;
+        }
+
+        .no-signals {
+            text-align: center;
+            padding: 60px 20px;
+            opacity: 0.5;
+        }
+
+        .no-signals svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .refresh-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: #4caf50;
+            border: none;
+            color: white;
+            font-size: 1.5rem;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .refresh-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.5);
+        }
+
+        .refresh-btn:active {
+            transform: scale(0.95);
+        }
+
+        .refresh-btn.spinning {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .endpoint-info {
+            margin-top: 40px;
+            padding: 20px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+
+        .endpoint-info code {
+            background: rgba(255,255,255,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .debug-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-family: monospace;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📡 TradingView Signal Server</h1>
+            <p style="opacity: 0.7; margin-bottom: 15px;">Recebe e distribui sinais do TradingView</p>
+            <span id="status" class="status waiting">Conectando...</span>
+        </div>
+
+        <div id="signals-container" class="signals-list">
+            <div class="no-signals">
+                <p>Carregando...</p>
+            </div>
+        </div>
+
+        <div class="endpoint-info">
+            <h3>Endpoints</h3>
+            <p style="margin-top: 10px;">
+                <strong>Webhook:</strong> <code>/webhook</code><br>
+                <strong>Sinal atual:</strong> <code>/signal</code><br>
+                <strong>Status:</strong> <code>/webhook</code> (GET)
+            </p>
+        </div>
+
+        <div id="debug-info" class="debug-info" style="display: none;"></div>
+    </div>
+
+    <button id="refresh-btn" class="refresh-btn" onclick="fetchSignals()">↻</button>
+
+    <script>
+        const signals = [];
+        let lastError = null;
+        let lastSignalHash = null; // Rastrear último sinal processado
+
+        async function fetchSignals() {
+            const btn = document.getElementById('refresh-btn');
+            btn.classList.add('spinning');
+
+            try {
+                const response = await fetch('/signal');
+                const statusEl = document.getElementById('status');
+
+                // Debug info
+                updateDebug('Response status: ' + response.status);
+
+                if (response.status === 404) {
+                    statusEl.className = 'status waiting';
+                    statusEl.textContent = '✓ Online - Aguardando sinais';
+                    lastSignalHash = null; // Reset quando não há sinal
+                    return;
+                }
+
+                if (response.ok) {
+                    const text = await response.text();
+                    updateDebug('Response: ' + text.substring(0, 100));
+
+                    const data = JSON.parse(text);
+                    if (data && (data.action || data.ticker)) {
+                        addSignal(data);
+                    }
+                    statusEl.className = 'status online';
+                    statusEl.textContent = '✓ Online';
+                } else {
+                    throw new Error('Status: ' + response.status);
+                }
+            } catch (error) {
+                lastError = error.message;
+                updateDebug('Error: ' + error.message);
+                console.error('Error:', error);
+                document.getElementById('status').className = 'status offline';
+                document.getElementById('status').textContent = '✗ Erro: ' + error.message.substring(0, 30);
+            } finally {
+                setTimeout(() => btn.classList.remove('spinning'), 500);
+            }
+        }
+
+        function updateDebug(message) {
+            const debugEl = document.getElementById('debug-info');
+            debugEl.style.display = 'block';
+            debugEl.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+        }
+
+        function addSignal(data) {
+            const action = (data.action || data.ticker || '').toLowerCase();
+            const symbol = data.symbol || data.exchange || 'N/A';
+
+            // Criar hash único do sinal (action + symbol)
+            const signalHash = `${action}:${symbol}`;
+
+            // Se é o mesmo sinal do último processado, ignorar
+            if (lastSignalHash === signalHash) {
+                return; // Sinal já mostrado, não adicionar novamente
+            }
+
+            lastSignalHash = signalHash;
+
+            signals.unshift({
+                action,
+                symbol,
+                timestamp: Date.now()
+            });
+
+            // Manter apenas os últimos 20 sinais
+            if (signals.length > 20) {
+                signals.pop();
+            }
+
+            renderSignals();
+        }
+
+        function renderSignals() {
+            const container = document.getElementById('signals-container');
+
+            if (signals.length === 0) {
+                container.innerHTML = `
+                    <div class="no-signals">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <p>Nenhum sinal recebido ainda</p>
+                        <p style="font-size: 0.9rem; margin-top: 10px;">
+                            Configure o webhook no TradingView:<br>
+                            <code>${window.location.origin}/webhook</code>
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = signals.map(signal => `
+                <div class="signal-card">
+                    <div class="signal-info">
+                        <div class="signal-direction ${signal.action}">
+                            ${signal.action === 'buy' ? '↑' : signal.action === 'sell' ? '↓' : '•'}
+                        </div>
+                        <div class="signal-details">
+                            <h3>${signal.symbol}</h3>
+                            <p>${signal.action.toUpperCase()}</p>
+                        </div>
+                    </div>
+                    <div class="signal-time">
+                        ${formatTime(signal.timestamp)}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diff = now - date;
+
+            if (diff < 60000) {
+                return 'Agora';
+            } else if (diff < 3600000) {
+                return Math.floor(diff / 60000) + ' min atrás';
+            } else {
+                return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            }
+        }
+
+        // Buscar sinais imediatamente
+        fetchSignals();
+
+        // Auto-refresh a cada 5 segundos
+        setInterval(fetchSignals, 5000);
+    </script>
+</body>
+</html>

@@ -23,9 +23,13 @@ input int      TakeProfitPoints = 1000;        // TP in points (e.g., 1000 = $10
 input int      StopLossPoints = 1000;           // SL in points (e.g., 500 = $5 for XAUUSD)
 
 //--- Grid Settings
-input int      PollingIntervalSec = 0;        // Signal polling frequency (seconds) - 0 = FASTEST
+input int      PollingIntervalSec = 1;        // Signal polling frequency (seconds)
 input string   SignalFilePath = "signal_XAUUSD.json"; // Signal file path (works for both XAUUSD and XAUUSDc)
 input int      GridIntervalSeconds = 1;       // Interval between grid orders (seconds)
+
+//--- Signal Source
+input bool     UseWebSignal = true;           // Use web signal (Vercel) instead of file
+input string   WebSignalURL = "https://tradingview-signal-server.vercel.app/signal"; // Web signal URL
 input double   ProfitTargetMoney = 20.0;      // Total profit target ($)
 input int      MaxGridOrders = 10;             // Maximum orders per direction
 input bool     CloseAllOnTarget = true;        // Close all when target reached
@@ -420,17 +424,26 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| Read signal file from Common Files directory                        |
+//| Read signal - from web (Vercel) or file                             |
 //+------------------------------------------------------------------+
 string ReadSignalFile()
 {
+    // Try web signal first if enabled
+    if (UseWebSignal)
+    {
+        string webSignal = GetWebSignal();
+        if (webSignal != "")
+            return webSignal;
+    }
+
+    // Fallback to file
     int fileHandle = FileOpen(SignalFilePath, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
 
     if (fileHandle == INVALID_HANDLE)
     {
         // File doesn't exist yet - not an error
         static datetime lastFileErrorLog = 0;
-        if (TimeCurrent() - lastFileErrorLog >= 30)
+        if (TimeCurrent() - lastFileErrorLog >= 60)
         {
             Print("Cannot open signal file: ", SignalFilePath);
             lastFileErrorLog = TimeCurrent();
@@ -447,6 +460,67 @@ string ReadSignalFile()
 
     FileClose(fileHandle);
     return content;
+}
+
+//+------------------------------------------------------------------+
+//| Get signal from Vercel server                                      |
+//+------------------------------------------------------------------+
+string GetWebSignal()
+{
+    string url = WebSignalURL;
+    string result = "";
+    string headers = "Content-Type: application/json\r\n";
+    int timeout = 5000;  // 5 seconds
+
+    char data[];
+    char response[];
+    string resultHeaders;
+
+    // Use WebRequest to fetch signal
+    int res = WebRequest("GET", url, headers, timeout, data, response, resultHeaders);
+
+    if (res == -1)
+    {
+        // WebRequest failed (might need to add URL to allowed list)
+        static datetime lastWebErrorLog = 0;
+        if (TimeCurrent() - lastWebErrorLog >= 60)
+        {
+            Print("WEB REQUEST FAILED - Add URL to Tools > Options > Expert Advisors > Allow WebRequest");
+            Print("URL to add: ", WebSignalURL);
+            lastWebErrorLog = TimeCurrent();
+        }
+        return "";
+    }
+
+    if (res == 200)
+    {
+        // Success - convert char array to string
+        result = CharArrayToString(response, 0, WHOLE_ARRAY, CP_UTF8);
+
+        // Check if it's a valid signal (not empty error response)
+        if (StringFind(result, "\"action\"") >= 0 || StringFind(result, "\"ticker\"") >= 0)
+        {
+            static datetime lastWebSignalLog = 0;
+            if (TimeCurrent() - lastWebSignalLog >= 30)
+            {
+                Print("WEB SIGNAL RECEIVED: ", result);
+                lastWebSignalLog = TimeCurrent();
+            }
+            return result;
+        }
+        // Empty or invalid signal (404 returns {"action":"","symbol":""})
+        return "";
+    }
+
+    // Non-200 response
+    static datetime lastHttpErrorLog = 0;
+    if (TimeCurrent() - lastHttpErrorLog >= 60)
+    {
+        Print("WEB SIGNAL HTTP ", res, " - No signal available");
+        lastHttpErrorLog = TimeCurrent();
+    }
+
+    return "";
 }
 
 //+------------------------------------------------------------------+

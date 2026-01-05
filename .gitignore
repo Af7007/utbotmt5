@@ -11,6 +11,10 @@ signal.json
 # Test outputs
 test_output*.txt
 
+# Node.js
+node_modules/
+package-lock.json
+
 # Python cache
 __pycache__/
 *.py[cod]

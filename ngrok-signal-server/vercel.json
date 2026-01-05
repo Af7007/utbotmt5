@@ -1,0 +1,26 @@
+{
+  "buildCommand": "npm install",
+  "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/:path*"
+    },
+    {
+      "source": "/webhook",
+      "destination": "/api/webhook.js"
+    },
+    {
+      "source": "/signal",
+      "destination": "/api/signal.js"
+    },
+    {
+      "source": "/signals",
+      "destination": "/api/signals.js"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/public/$1"
+    }
+  ]
+}

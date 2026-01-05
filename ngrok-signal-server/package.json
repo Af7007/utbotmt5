@@ -4,12 +4,14 @@
   "description": "Servidor para receber sinais do TradingView via webhook e distribuir para múltiplos clientes",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "deploy": "vercel --prod"
   },
   "keywords": ["tradingview", "webhook", "signal", "ngrok"],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "@vercel/kv": "^1.0.1"
   }
 }

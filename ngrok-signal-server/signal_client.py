@@ -19,8 +19,11 @@ import time
 from datetime import datetime
 
 # ==================== CONFIGURAÇÕES ====================
-# URL do servidor ngrok (substitua pela sua URL)
-NGROK_URL = "https://abc123.ngrok-free.app"
+# URL do servidor (ngrok local OU Vercel)
+# Opcões:
+#   ngrok local: "https://livelier-nonpurposively-monty.ngrok-free.dev"
+#   Vercel:      "https://tradingview-signal-server.vercel.app"
+NGROK_URL = "https://tradingview-signal-server.vercel.app"
 
 # Nome do arquivo de sinal
 SIGNAL_FILENAME = "signal_XAUUSD.json"

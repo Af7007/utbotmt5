@@ -5,22 +5,16 @@ Distribua sinais do TradingView para múltiplos computadores em redes diferentes
 ## Arquitetura
 
 ```
-TradingView → Ngrok → Script Client (PC1, PC2, ...) → Arquivo Local → EA MT5
+TradingView → Ngrok → Signal Client .exe (PC1, PC2, ...) → Arquivo Local → EA MT5
 ```
+
+**URL configurada:** `https://livelier-nonpurposively-monty.ngrok-free.dev`
 
 ---
 
 ## COMPUTADOR PRINCIPAL (Server)
 
-### 1. Instalar Node.js
-
-Baixe e instale: https://nodejs.org/
-
-### 2. Instalar ngrok
-
-Baixe e instale: https://ngrok.com/download
-
-### 3. Preparar o Servidor
+### 1. Iniciar o Servidor Node.js
 
 ```bash
 cd C:\utbot\ngrok-signal-server
@@ -28,33 +22,60 @@ npm install
 npm start
 ```
 
-### 4. Iniciar o Ngrok
+### 2. Iniciar o Ngrok
 
 Em outro terminal:
 
 ```bash
-ngrok http 3000
+ngrok http 8080 --domain=livelier-nonpurposively-monty.ngrok-free.dev
 ```
 
-**Copie a URL gerada**, exemplo: `https://abc123.ngrok-free.app`
+### 3. Configurar TradingView
 
-### 5. Configurar TradingView
-
-No TradingView, adicione um webhook com a URL:
-
+Webhook URL:
 ```
-https://abc123.ngrok-free.app/webhook
+https://livelier-nonpurposively-monty.ngrok-free.dev/webhook
 ```
 
 ---
 
-## COMPUTADORES CLIENTES
+## COMPUTADORES CLIENTES (OPÇÃO 1 - EXECUTÁVEL)
+
+**Mais simples! Não precisa instalar Python.**
+
+### 1. Criar o Executável
+
+No PC principal (uma vez só):
+
+```bash
+cd C:\utbot\ngrok-signal-server
+build.bat
+```
+
+Isso cria `dist\signal_client.exe`
+
+### 2. Copiar para Outros PCs
+
+Copie apenas o arquivo `dist\signal_client.exe` para cada PC.
+
+### 3. Executar
+
+Dê dois cliques no `signal_client.exe` - pronto!
+
+### 4. Auto-iniciar com Windows
+
+1. `Win+R` → `shell:startup` → Enter
+2. Crie atalho para `signal_client.exe`
+
+---
+
+## COMPUTADORES CLIENTES (OPÇÃO 2 - PYTHON)
+
+Se preferir usar Python diretamente:
 
 ### 1. Instalar Python 3
 
-Baixe e instale: https://www.python.org/downloads/
-
-Marque "Add Python to PATH" durante a instalação.
+https://www.python.org/ (marque "Add Python to PATH")
 
 ### 2. Instalar requests
 
@@ -62,74 +83,41 @@ Marque "Add Python to PATH" durante a instalação.
 pip install requests
 ```
 
-### 3. Editar signal_client.py
-
-Altere a linha `NGROK_URL` para sua URL:
-
-```python
-NGROK_URL = "https://abc123.ngrok-free.app"  # sua URL
-```
-
-### 4. Testar
+### 3. Executar
 
 ```bash
 python signal_client.py
 ```
 
-Você deve ver:
+---
+
+## Testar
+
+No PC client, você deve ver:
+
 ```
 ==================================================
     TRADINGVIEW SIGNAL CLIENT
 ==================================================
-Servidor: https://abc123.ngrok-free.app/signal
+Servidor: https://livelier-nonpurposively-monty.ngrok-free.dev/signal
 Arquivo local: C:\Users\...\signal_XAUUSD.json
 Intervalo: 5 segundos
 ==================================================
 [14:30:15] ✓ Sinal: XAUUSD | buy
 ```
 
-### 5. Auto-iniciar com Windows
-
-Para o script iniciar automaticamente com o Windows:
-
-1. Pressione `Win+R`
-2. Digite `shell:startup` e Enter
-3. Crie um atalho com:
-   - Alvo: `pythonw.exe "C:\utbot\ngrok-signal-server\signal_client.py"`
-   - Iniciar em: `C:\utbot\ngrok-signal-server\`
-
----
-
-## EA MT5
-
-NÃO precisa ser modificado! O EA continua lendo o arquivo local normalmente.
-
----
-
-## Testar Webhook
-
-Use curl para testar:
-
-```bash
-curl -X POST https://abc123.ngrok-free.app/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"action":"buy","symbol":"XAUUSD"}'
-```
-
-Ou use o site https://webhook.site para testar.
-
 ---
 
 ## Troubleshooting
 
-### Erro "Cannot open signal file"
-- Verifique se o caminho está correto em `get_mt5_common_path()`
-- Cada instalação do MT5 pode ter caminhos diferentes
+### Erro "ngrok.yml: unknown version '3'"
+Corrigido! Execute `ngrok` normalmente.
 
-### Ngrok URL expirou
-- URLs gratuitas do ngrok mudam quando reiniciado
-- Atualize `NGROK_URL` em todos os clients após reiniciar o ngrok
+### Client não conecta
+- Verifique se o servidor Node.js está rodando no PC principal
+- Verifique se o ngrok está rodando
+- Teste a URL no navegador: `https://livelier-nonpurposively-monty.ngrok-free.dev/signal`
 
-### Script não inicia no startup
-- Use `pythonw.exe` em vez de `python` (não abre janela)
-- Verifique o caminho completo do python: `where python`
+### MT5 não lê o arquivo
+- Caminho correto: `C:\Users\SEU_USUARIO\AppData\Roaming\MetaQuotes\Terminal\Common\Files\`
+- O EA deve ler do diretório `FILE_COMMON`
