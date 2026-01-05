@@ -33,7 +33,7 @@ input bool     CloseAllOnTarget = true;        // Close all when target reached
 //--- Hedge Strategy (NEVER closes in loss, always waits for profit)
 input bool     EnableHedgeMode = true;         // Enable hedge mode (opens new direction without closing old)
 input double   HedgeProfitTarget = 50.0;       // Close ALL when total profit reaches this amount ($)
-input double   HedgeLotMultiplier = 1.5;       // Multiply lot size for hedge positions
+input double   MartingaleMultiplier = 3.0;     // Martingale multiplier per signal (3x = 1,3,9,27...)
 
 //--- Protection
 input double   MaxDrawdownPercent = 5.0;      // Maximum drawdown (% of equity) - REDUCED FOR SAFETY
@@ -59,11 +59,14 @@ datetime lastGridOrderTime = 0;        // Last grid order timestamp
 int currentGridLevel = 0;              // Current grid level (order count)
 bool targetReached = false;            // If $100 target was reached
 
-//--- Hedge State
-bool inHedgeMode = false;              // If currently in hedge mode (both directions open)
-string hedgeOldDirection = "";         // The old direction before hedge
+//--- Martingale by Consecutive Signals
+int consecutiveSignalCount = 0;        // Number of consecutive signals (all)
+
+//--- Hedge Mode State
+bool inHedgeMode = false;              // Currently in hedge mode
+string hedgeOldDirection = "";         // Direction before hedge started
 datetime hedgeStartTime = 0;           // When hedge mode started
-int hedgeNewLevel = 0;                 // Grid level in NEW direction (hedge orders)
+int hedgeNewLevel = 0;                 // Grid level for new (hedge) direction
 
 //--- Signal Control
 string lastProcessedJson = "";         // Last processed JSON
@@ -111,7 +114,7 @@ int OnInit()
     Print("Use Fixed Lots: ", UseFixedLots ? "YES" : "NO", " (", UseFixedLots ? FixedLotSize : DoubleToString(RiskPercent, 1) + "%", ")");
     Print("Hedge Mode: ", EnableHedgeMode ? "ENABLED" : "DISABLED");
     if (EnableHedgeMode)
-        Print("Hedge Lot Multiplier: x", HedgeLotMultiplier, " | Hedge Profit Target: $", HedgeProfitTarget);
+        Print("Martingale: ", MartingaleMultiplier, "x per signal | Hedge Profit Target: $", HedgeProfitTarget);
 
     // Verify symbol info is valid
     if (!symbolInfo.RefreshRates())
@@ -266,132 +269,53 @@ void OnTimer()
             Print("=== SIGNAL RECEIVED ===");
             Print("Signal Direction: ", signalDirection);
             Print("Current Direction: ", currentDirection);
-            Print("Hedge Mode: ", inHedgeMode ? "YES" : "NO");
+            Print("Consecutive Signals: ", consecutiveSignalCount);
             Print("Positions: ", PositionsTotal());
             lastSignalTime = TimeCurrent();
 
-            // 3. If no direction (first signal)
-            if (currentDirection == "" && !inHedgeMode)
-            {
-                Print(">>> FIRST SIGNAL - Opening in direction: ", signalDirection);
+            // Increment consecutive signal counter
+            consecutiveSignalCount++;
+            double multiplier = MathPow(MartingaleMultiplier, consecutiveSignalCount - 1);
+            Print("Signal #", consecutiveSignalCount, " | Multiplier: ", multiplier, "x (", MartingaleMultiplier, "^", consecutiveSignalCount - 1, ")");
 
+            // Enter hedge mode if we have existing positions (either direction)
+            if (PositionsTotal() > 0 && !inHedgeMode && EnableHedgeMode)
+            {
+                inHedgeMode = true;
+                hedgeOldDirection = currentDirection;
+                hedgeStartTime = TimeCurrent();
+                hedgeNewLevel = 0;
+                Print("=== HEDGE MODE ACTIVATED ===");
+                Print("Will NOT close positions until profit >= $", HedgeProfitTarget);
+            }
+
+            // Update current direction to new signal direction
+            currentDirection = signalDirection;
+
+            // Open up to MaxGridOrders orders in the signal direction immediately
+            int ordersToOpen = MaxGridOrders;
+            Print("=== OPENING ", ordersToOpen, " ORDERS ===");
+            Print("Direction: ", signalDirection);
+            Print("Lot Size: ", FixedLotSize, " x ", multiplier, " = ", FixedLotSize * multiplier, " each");
+
+            int ordersOpened = 0;
+            for (int i = 0; i < ordersToOpen; i++)
+            {
                 if (ExecuteGridOrder(signalDirection))
                 {
-                    currentDirection = signalDirection;
-                    lastProcessedJson = jsonContent;
-                    Print("Grid started. Direction: ", currentDirection);
-                }
-            }
-            // 4. Already have direction - check for reversal or hedge
-            else
-            {
-                Print("Already trading. Current: ", currentDirection, " Signal: ", signalDirection);
-
-                // Check if signal is opposite direction
-                bool isOppositeSignal = (signalDirection != currentDirection);
-
-                if (isOppositeSignal)
-                {
-                    // Check for losing positions - if yes, use HEDGE mode
-                    int losingPositions = 0;
-                    int totalPositions = 0;
-                    double totalUnrealizedPL = 0;
-
-                    for (int i = PositionsTotal() - 1; i >= 0; i--)
-                    {
-                        if (positionInfo.SelectByIndex(i))
-                        {
-                            if (positionInfo.Symbol() == activeSymbol &&
-                                positionInfo.Magic() == MagicNumber)
-                            {
-                                totalPositions++;
-                                double posProfit = positionInfo.Profit();
-                                totalUnrealizedPL += posProfit;
-                                if (posProfit < 0)
-                                {
-                                    losingPositions++;
-                                }
-                                Print("POSITION CHECK: Ticket=", positionInfo.Ticket(), " Profit=", posProfit);
-                            }
-                        }
-                    }
-
-                    double myProfit = GetMyTotalProfit();
-
-                    Print("=== SIGNAL REVERSAL CHECK ===");
-                    Print("Total Positions: ", totalPositions, " Losing: ", losingPositions);
-                    Print("Total Unrealized P&L: $", totalUnrealizedPL);
-                    Print("MY Profit (EA only): $", myProfit);
-                    Print("In Hedge Mode: ", inHedgeMode ? "YES" : "NO");
-
-                    // If has losing positions AND hedge enabled, enter HEDGE mode
-                    if (losingPositions > 0 && !inHedgeMode && EnableHedgeMode)
-                    {
-                        Print("=== ENTERING HEDGE MODE (WEBHOOK) ===");
-                        Print("Opposite signal received but has ", losingPositions, " losing positions");
-                        Print("Old Direction: ", currentDirection, " | New Direction: ", signalDirection);
-                        Print("Current Profit: $", myProfit);
-                        Print("Opening NEW direction positions WITHOUT closing old ones");
-                        Print("HEDGE LOT MULTIPLIER: x", HedgeLotMultiplier);
-
-                        // Set hedge state
-                        hedgeOldDirection = currentDirection;
-                        hedgeStartTime = TimeCurrent();
-                        hedgeNewLevel = 0;
-                        inHedgeMode = true;
-
-                        // Update current direction to NEW direction (for new orders)
-                        currentDirection = signalDirection;
-
-                        // Open first order in NEW direction with MARTINGALE (multiplied lot) - IMMEDIATE
-                        if (ExecuteGridOrder(signalDirection))
-                        {
-                            Print("HEDGE MODE ACTIVATED (webhook) with x", HedgeLotMultiplier, " MARTINGALE");
-                            Print("Old positions remain open. Adding positions in ", currentDirection);
-                            Print("Will exit hedge when profit >= $", HedgeProfitTarget);
-                        }
-                        else
-                        {
-                            Print("FAILED to open hedge order - retrying immediately...");
-                            Sleep(100);
-                            ExecuteGridOrder(signalDirection);
-                        }
-
-                        lastProcessedJson = jsonContent;
-                        return;
-                    }
-
-                    // If all positions profitable OR hedge disabled, do normal reversal
-                    if (ShouldReverseDirection(signalDirection))
-                    {
-                        Print("=== REVERSAL TRIGGERED ===");
-                        Print("Closing all and reversing to: ", signalDirection);
-
-                        if (CloseAllPositions())
-                        {
-                            Sleep(1000);
-
-                            if (ExecuteGridOrder(signalDirection))
-                            {
-                                currentDirection = signalDirection;
-                                targetReached = false;
-                                lastProcessedJson = jsonContent;
-                                Print("Reversal complete. New direction: ", currentDirection);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Print("Signal ignored - reversal conditions not met");
-                        lastProcessedJson = jsonContent;
-                    }
+                    ordersOpened++;
+                    // Small delay between orders to avoid broker rejection
+                    if (i < ordersToOpen - 1)
+                        Sleep(100);
                 }
                 else
                 {
-                    Print("Signal ignored - same direction");
-                    lastProcessedJson = jsonContent;
+                    Print("FAILED to open order #", i + 1);
                 }
             }
+
+            Print("Opened ", ordersOpened, "/", ordersToOpen, " orders in direction: ", signalDirection);
+            lastProcessedJson = jsonContent;
         }
     }
 
@@ -480,23 +404,15 @@ void OnTimer()
             return;
         }
 
-        // 5.2 Check if should add grid order
-        if (ShouldAddGridOrder())
-        {
-            Print("=== ADDING GRID ORDER ===");
-            Print("Current Level: ", currentGridLevel, " Direction: ", currentDirection);
-
-            if (ExecuteGridOrder(currentDirection))
-            {
-                Print("Grid order added. New level: ", currentGridLevel);
-            }
-        }
+        // 5.2 Note: Grid orders are now opened immediately on each signal (no time-based addition)
+        // Each signal opens up to MaxGridOrders orders immediately
 
         // 5.3 Check stop loss for individual positions
         CheckStopLoss();
 
-        // 5.4 Manage trailing stop for profitable positions (DISABLED in hedge mode)
-        if (!inHedgeMode)
+        // 5.4 Manage trailing stop ONLY on first signal (consecutiveSignalCount == 1)
+        // After first signal, control is only by HedgeProfitTarget
+        if (consecutiveSignalCount == 1)
         {
             ManageTrailingStop();
         }
@@ -659,87 +575,6 @@ string ExtractDirectionFromJSON(string jsonContent)
 }
 
 //+------------------------------------------------------------------+
-//| Check if should add grid order                                     |
-//+------------------------------------------------------------------+
-bool ShouldAddGridOrder()
-{
-    // Check interval
-    if (TimeCurrent() - lastGridOrderTime < GridIntervalSeconds)
-        return false;
-
-    // In hedge mode, check NEW direction level; otherwise check total level
-    int ordersToAdd = inHedgeMode ? hedgeNewLevel : currentGridLevel;
-
-    // Check max orders
-    if (ordersToAdd >= MaxGridOrders)
-    {
-        Print("Max grid orders reached: ", MaxGridOrders, " (Hedge mode: ", inHedgeMode, ")");
-        return false;
-    }
-
-    // Check drawdown limit (using THIS EA's profit only, not total account)
-    double myProfit = GetMyTotalProfit();
-    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-    double maxLoss = equity * (MaxDrawdownPercent / 100.0);
-
-    if (myProfit < -maxLoss)
-    {
-        Print("Drawdown limit reached: $", myProfit, " Max loss: $", -maxLoss);
-        return false;
-    }
-
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Check if should reverse direction                                  |
-//+------------------------------------------------------------------+
-bool ShouldReverseDirection(string newSignalDirection)
-{
-    Print("ShouldReverseDirection: new=", newSignalDirection, " current=", currentDirection);
-
-    // Must be opposite direction
-    if (newSignalDirection == currentDirection)
-    {
-        Print("BLOCK: Same direction");
-        return false;
-    }
-
-    // Reversal confirmed - close all positions and reverse
-    Print("=== REVERSAL TRIGGERED ===");
-    Print("- New signal direction: ", newSignalDirection, " (opposite of ", currentDirection, ")");
-    Print("- Will close ALL positions and reverse direction");
-
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Check if current positions are profitable                          |
-//+------------------------------------------------------------------+
-bool AreCurrentPositionsProfitable()
-{
-    int profitableCount = 0;
-    int totalCount = 0;
-
-    for (int i = PositionsTotal() - 1; i >= 0; i--)
-    {
-        if (positionInfo.SelectByIndex(i))
-        {
-            if (positionInfo.Symbol() == activeSymbol &&
-                positionInfo.Magic() == MagicNumber)
-            {
-                totalCount++;
-                if (positionInfo.Profit() > 0)
-                    profitableCount++;
-            }
-        }
-    }
-
-    // Consider profitable if at least half are in profit
-    return (totalCount > 0 && profitableCount >= totalCount / 2);
-}
-
-//+------------------------------------------------------------------+
 //| Execute grid order                                                |
 //+------------------------------------------------------------------+
 bool ExecuteGridOrder(string direction)
@@ -877,18 +712,12 @@ double CalculateVolume(string direction = "")
         Print("PERCENTAGE MODE: Risk=", RiskPercent, "% Equity=", equity, " Calculated: ", baseVolume);
     }
 
-    // Apply Hedge Lot Multiplier if in hedge mode
-    // ALL hedge orders use multiplied lot, not just the first one
-    if (inHedgeMode)
-    {
-        volume = baseVolume * HedgeLotMultiplier;
-        Print("HEDGE MODE: Base lot=", baseVolume, " x ", HedgeLotMultiplier, " = ", volume);
-    }
-    else
-    {
-        volume = baseVolume;
-        Print("NORMAL MODE: Using base volume: ", volume);
-    }
+    // Apply Martingale: multiplier^N based on consecutive signal count
+    // multiplier^(count-1): signal 1 = 1x, signal 2 = 3x, signal 3 = 9x, signal 4 = 27x...
+    double martingaleMultiplier = MathPow(MartingaleMultiplier, consecutiveSignalCount - 1);
+    volume = baseVolume * martingaleMultiplier;
+
+    Print("MARTINGALE: Base lot=", baseVolume, " x ", MartingaleMultiplier, "^", consecutiveSignalCount - 1, " = ", volume, " (signal #", consecutiveSignalCount, ")");
 
     // Validate lot size
     if (ValidateLotSize)
@@ -1037,16 +866,13 @@ void ManageTrailingStop()
                     {
                         double newSL = NormalizeDouble(bid - TrailingStopPoints * point, digits);
 
-                        // Only move SL if it's better than current SL by at least TrailingStep
+                        // Move SL if improvement >= TrailingStep (immediate update, no wait)
                         if (currentSL == 0 || (newSL - currentSL) / point >= TrailingStepPoints)
                         {
-                            if (currentSL == 0 || newSL > currentSL)
-                            {
-                                trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
-                                Print("TRAILING STOP (BUY): Ticket=", ticket,
-                                      " OldSL=", currentSL, " NewSL=", newSL,
-                                      " Bid=", bid, " Profit=", profitPoints, " points");
-                            }
+                            trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
+                            Print("TRAILING STOP (BUY): Ticket=", ticket,
+                                  " OldSL=", currentSL, " NewSL=", newSL,
+                                  " Bid=", bid, " Profit=", profitPoints, " points");
                         }
                     }
                 }
@@ -1060,16 +886,13 @@ void ManageTrailingStop()
                     {
                         double newSL = NormalizeDouble(ask + TrailingStopPoints * point, digits);
 
-                        // Only move SL if it's better (lower) than current SL by at least TrailingStep
+                        // Move SL if improvement >= TrailingStep (immediate update, no wait)
                         if (currentSL == 0 || (currentSL - newSL) / point >= TrailingStepPoints)
                         {
-                            if (currentSL == 0 || newSL < currentSL)
-                            {
-                                trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
-                                Print("TRAILING STOP (SELL): Ticket=", ticket,
-                                      " OldSL=", currentSL, " NewSL=", newSL,
-                                      " Ask=", ask, " Profit=", profitPoints, " points");
-                            }
+                            trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
+                            Print("TRAILING STOP (SELL): Ticket=", ticket,
+                                  " OldSL=", currentSL, " NewSL=", newSL,
+                                  " Ask=", ask, " Profit=", profitPoints, " points");
                         }
                     }
                 }
@@ -1094,5 +917,9 @@ void ResetGridState()
     hedgeOldDirection = "";
     hedgeStartTime = 0;
     hedgeNewLevel = 0;
+
+    // Reset consecutive signal counter (back to first signal = 1x)
+    consecutiveSignalCount = 0;
+    Print("RESET: Consecutive signal counter reset to 0 (next signal will be 1x)");
 }
 //+------------------------------------------------------------------+
